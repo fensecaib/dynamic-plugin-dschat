@@ -1,7 +1,7 @@
 plugins {
     id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 }
-rootProject.name = "dynamic-bot-weibo"
+rootProject.name = "dynamic-bot-agent"
 
 val localCore = file("../dynamic-bot-core")
 if (localCore.isDirectory) {

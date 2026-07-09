@@ -1,18 +1,9 @@
-id: weibo-publisher
-name: 微博动态源插件
-version: 0.0.2
-mainClass: top.colter.dynamic.weibo.WeiboPublisherPlugin
+id: dynamic-agent
+name: 多功能Agent插件
+version: 0.1.0
+mainClass: top.colter.dynamic.agent.DynamicAgentPlugin
 apiVersion: 2.0.0
-description: 微博动态轮询、发布者资料查询、关注分组与订阅分发插件。
+description: >
+  DeepSeek AI 对话、Dota2 战报分析、联网搜索、微博链接渲染。
+  指令: /ds <问题> | /dota <子命令>
 author: dynamic-bot
-drawAssets:
-  - platformId: weibo
-    key: logo.primary
-    kind: LOGO
-    resourcePath: draw/weibo/logo/primary.png
-    mimeType: image/png
-  - platformId: weibo
-    key: logo.wordmark
-    kind: LOGO
-    resourcePath: draw/weibo/logo/wordmark.png
-    mimeType: image/png

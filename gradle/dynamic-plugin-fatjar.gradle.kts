@@ -36,5 +36,9 @@ fun File.isDynamicBotHostProvided(): Boolean {
         name.startsWith("log4j-to-slf4j-") ||
         name.startsWith("logback-") ||
         name.startsWith("jul-to-slf4j-") ||
-        name.startsWith("slf4j-")
+        name.startsWith("slf4j-") ||
+        name.startsWith("skiko-awt-") ||
+        name.startsWith("skiko-awt-runtime-") ||
+        name.startsWith("skiko-layout-") ||
+        name.startsWith("kotlin-stdlib-")
 }
