@@ -73,6 +73,7 @@ data class Dota2MatchReport(
 data class Dota2PlayerCard(
     val name: String,
     val heroName: String,
+    val heroId: Int = 0,
     val heroIcon: Image? = null,
     val isRadiant: Boolean = true,
     val kills: Int = 0,

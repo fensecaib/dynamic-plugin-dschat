@@ -1,16 +1,20 @@
 package top.colter.dynamic.agent.draw
 
 import org.jetbrains.skia.Color
-import org.jetbrains.skia.Font
 import org.jetbrains.skia.Image
 import org.jetbrains.skia.Paint
 import org.jetbrains.skia.PaintMode
 import org.jetbrains.skia.RRect
 import org.jetbrains.skia.Surface
+import org.jetbrains.skia.paragraph.Alignment
+import org.jetbrains.skia.paragraph.ParagraphBuilder
+import org.jetbrains.skia.paragraph.ParagraphStyle
 import org.jetbrains.skia.paragraph.TextStyle
 import top.colter.dynamic.agent.config.ImageConfig
+import top.colter.dynamic.agent.dota2.ANONYMOUS_PLAYER_NAME
 import top.colter.dynamic.agent.dota2.Dota2MatchReport
 import top.colter.dynamic.agent.dota2.Dota2PlayerCard
+import top.colter.dynamic.agent.dota2.isAnonymousDota2PlayerName
 import top.colter.skiko.*
 import top.colter.skiko.data.LayoutAlignment
 import top.colter.skiko.data.RichParagraphBuilder
@@ -22,7 +26,8 @@ val C_EVEN  = Color.makeRGB( 21,  30,  48)
 val C_HDR   = Color.makeRGB( 30,  58,  95)
 val C_TXT   = Color.makeRGB(226, 232, 240)
 val C_TXT2  = Color.makeRGB(148, 163, 184)
-val C_DIM   = Color.makeRGB(100, 116, 139)
+// 次要信息仍需在深色背景上保持足够对比度，避免小字号发灰、发虚。
+val C_DIM   = Color.makeRGB(125, 141, 163)
 val C_GREEN = Color.makeRGB( 34, 197,  94)
 val C_RED   = Color.makeRGB(239,  68,  68)
 val C_GOLD  = Color.makeRGB(245, 158,  11)
@@ -56,37 +61,55 @@ private fun stampLabel(tag: String) = when {
 }
 
 private fun makeStampImage(label: String, accent: Int, fr: FontRegistry = Fonts.default): Image {
-    val text = "[$label]"
-    val width = 74
-    val height = 34
-    val surface = Surface.makeRasterN32Premul(width, height)
-    val canvas = surface.canvas
-    canvas.clear(Color.TRANSPARENT)
+    val width = 86
+    val height = 36
+    return Surface.makeRasterN32Premul(width, height).use { surface ->
+        Paint().use { borderPaint ->
+            borderPaint.color = accent
+            borderPaint.mode = PaintMode.STROKE
+            borderPaint.strokeWidth = 2f
+            borderPaint.isAntiAlias = true
 
-    val borderPaint = Paint().apply {
-        color = accent
-        mode = PaintMode.STROKE
-        strokeWidth = 2.2f
-    }
-    val bgPaint = Paint().apply {
-        color = accent.withAlpha(0.10f)
-        mode = PaintMode.FILL
-    }
-    val textPaint = Paint().apply {
-        color = accent
-    }
-    val stampFont = fr.textTypeface?.let { Font(it, 12f) } ?: Font().apply { size = 12f }
+            Paint().use { bgPaint ->
+                bgPaint.color = accent.withAlpha(0.08f)
+                bgPaint.mode = PaintMode.FILL
+                bgPaint.isAntiAlias = true
 
-    canvas.save()
-    canvas.rotate(-10f, width / 2f, height / 2f)
-    val r = RRect.makeLTRB(7f, 8f, width - 7f, height - 8f, 4f)
-    canvas.drawRRect(r, bgPaint)
-    canvas.drawRRect(r, borderPaint)
-    val textWidth = stampFont.measureTextWidth(text, textPaint)
-    canvas.drawString(text, (width - textWidth) / 2f, 22f, stampFont, textPaint)
-    canvas.restore()
-
-    return surface.makeImageSnapshot()
+                // 印章文字也走布局库使用的 Paragraph/FontCollection，确保自定义字体、中文和
+                // fallback 字体都能生效。Canvas.drawString 只绑定单个 Typeface，在宿主字体
+                // 注册表下会出现边框存在、文字却没有 glyph 的情况。
+                val family = fr.textTypeface?.familyName ?: ""
+                TextStyle().use { requestedStyle ->
+                    requestedStyle.setColor(accent).setFontSize(14f).setFontFamily(family)
+                    fr.resolveTextStyle(requestedStyle).use { stampStyle ->
+                        ParagraphStyle().use { paragraphStyle ->
+                            paragraphStyle.alignment = Alignment.CENTER
+                            paragraphStyle.maxLinesCount = 1
+                            ParagraphBuilder(paragraphStyle, fr.fonts).use { builder ->
+                                builder.pushStyle(stampStyle).addText(label).build().use { paragraph ->
+                                    paragraph.layout(width - 16f)
+                                    val canvas = surface.canvas
+                                    canvas.clear(Color.TRANSPARENT)
+                                    canvas.save()
+                                    try {
+                                        canvas.rotate(-8f, width / 2f, height / 2f)
+                                        // 为旋转后的四角预留安全区，避免印章边框和文字被图片边界裁掉。
+                                        val r = RRect.makeLTRB(6f, 7f, width - 6f, height - 7f, 4f)
+                                        canvas.drawRRect(r, bgPaint)
+                                        canvas.drawRRect(r, borderPaint)
+                                        paragraph.paint(canvas, 8f, ((height - paragraph.height) / 2f).coerceAtLeast(0f))
+                                    } finally {
+                                        canvas.restore()
+                                    }
+                                    surface.makeImageSnapshot()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 suspend fun dota2MatchDraw(report: Dota2MatchReport, config: ImageConfig, fontRegistry: FontRegistry = Fonts.default): Image? {
@@ -107,10 +130,13 @@ fun Layout.sep() = Box(Modifier().fillMaxWidth().height(1.dp).background(C_BORDE
 fun Layout.topBar(r: Dota2MatchReport, fr: FontRegistry = Fonts.default) {
     val ff = fr.textTypeface?.familyName ?: ""
     Row(Modifier().fillMaxWidth().height(44.dp).background(C_HDR), alignment=LayoutAlignment.LEFT) {
-        Row(Modifier().width(720.dp).height(44.dp), alignment=LayoutAlignment.LEFT) {
-            Text(text="  比赛编号#${r.matchId}", color=C_BLUE, fontSize=20.dp, fontFamily=ff)
-            Text(text="  ${r.gameMode}", color=C_TXT2, fontSize=18.dp, fontFamily=ff)
-            Text(text="  ${fmtDur(r.duration)}", color=C_TXT2, fontSize=18.dp, fontFamily=ff)
+        // 先形成一行共享高度的元信息，再将整行放到顶栏左侧的垂直中心。
+        Box(Modifier().width(720.dp).height(44.dp).padding(top=8.dp), alignment=LayoutAlignment.LEFT) {
+            Row(Modifier().width(720.dp), alignment=LayoutAlignment.LEFT) {
+                Text(text="比赛编号#${r.matchId}", color=C_BLUE, fontSize=20.dp, fontFamily=ff, modifier=Modifier().margin(left=12.dp))
+                Text(text=r.gameMode, color=C_TXT2, fontSize=18.dp, fontFamily=ff, modifier=Modifier().margin(left=14.dp))
+                Text(text=fmtDur(r.duration), color=C_TXT2, fontSize=18.dp, fontFamily=ff, modifier=Modifier().margin(left=14.dp))
+            }
         }
         Box(Modifier().width(340.dp).height(44.dp), alignment=LayoutAlignment.RIGHT) {
             Text(text="${fmtTs(r.startTime)}  ", color=C_DIM, fontSize=16.dp, fontFamily=ff, alignment=LayoutAlignment.RIGHT)
@@ -142,19 +168,18 @@ fun Layout.playerRow(idx: Int, p: Dota2PlayerCard, bg: Int, fr: FontRegistry = F
     val tag = when{ p.isMvp->"MVP"; p.isSvp->"SVP"; p.isCriminal->"CW"; else->null }
     val tb  = when{ p.isMvp->C_GREEN; p.isSvp->C_GOLD; p.isCriminal->C_RED; else->C_BG }
     val rowH = 50.dp
-    val displayName = when { p.name.isEmpty() || p.name == "?" -> p.heroName; else -> p.name }
+    val anonymous = isAnonymousDota2PlayerName(p.name)
+    val primaryLabel = if (anonymous) p.heroName else p.name
 
     Row(Modifier().fillMaxWidth().height(rowH).background(bg), alignment=LayoutAlignment.LEFT) {
         Box(Modifier().width(22.dp).height(rowH), alignment=LayoutAlignment.CENTER) {
             if(tag!=null) {
-                Box(Modifier().width(20.dp).height(14.dp).background(tb).border(0.dp,3.dp), alignment=LayoutAlignment.CENTER) {
-                    Text(text=tag, color=Color.WHITE, fontSize=8.dp, fontFamily=ff, alignment=LayoutAlignment.CENTER)
-                }
+                statusBadge(tag, tb, 20.dp, 16.dp, 8.dp, fr)
             } else Text(text="$idx", color=C_DIM, fontSize=13.dp, fontFamily=ff, alignment=LayoutAlignment.CENTER)
         }
         Box(Modifier().width(68.dp).height(rowH), alignment=LayoutAlignment.CENTER) {
             if (p.heroIcon != null) {
-                Image(image=p.heroIcon, modifier=Modifier().width(64.dp).height(36.dp))
+                Image(image=p.heroIcon, alignment=LayoutAlignment.CENTER, modifier=Modifier().width(64.dp))
             } else {
                 Box(Modifier().width(64.dp).height(36.dp).background(C_BORDER.withAlpha(0.2f)).border(1.dp,3.dp,C_DIM), alignment=LayoutAlignment.CENTER) {
                     Text(text=p.heroName.take(3), color=C_DIM.withAlpha(0.35f), fontSize=9.dp, fontFamily=ff, alignment=LayoutAlignment.CENTER)
@@ -163,8 +188,10 @@ fun Layout.playerRow(idx: Int, p: Dota2PlayerCard, bg: Int, fr: FontRegistry = F
         }
         Box(Modifier().width(120.dp).height(rowH).margin(0.dp, 0.dp, 0.dp, 2.dp), alignment=LayoutAlignment.LEFT) {
             Column(Modifier().width(118.dp).height(34.dp), alignment=LayoutAlignment.LEFT) {
-                Text(text=displayName, color=C_TXT, fontSize=14.dp, fontFamily=ff)
-                if (p.rankName.isNotEmpty()) {
+                Text(text=primaryLabel, color=C_TXT, fontSize=14.dp, fontFamily=ff)
+                if (anonymous) {
+                    Text(text=ANONYMOUS_PLAYER_NAME, color=C_DIM, fontSize=11.dp, fontFamily=ff)
+                } else if (p.rankName.isNotEmpty()) {
                     Text(text=p.rankName, color=rankColor(p.rankTier), fontSize=11.dp, fontFamily=ff)
                 } else {
                     Text(text=p.heroName, color=C_DIM, fontSize=11.dp, fontFamily=ff)
@@ -193,28 +220,30 @@ fun Layout.playerRow(idx: Int, p: Dota2PlayerCard, bg: Int, fr: FontRegistry = F
             p.backpackItems.take(3).forEach { img -> itemSlot(img, 24.dp, fr=fr) }
             repeat(3 - p.backpackItems.take(3).size) { itemSlot(null, 24.dp, fr=fr) }
         }
-        Row(modifier = Modifier().width(50.dp).height(rowH), alignment=LayoutAlignment.CENTER) {
-            if (p.aghsScepterIcon != null) {
-                Image(image=p.aghsScepterIcon, modifier=Modifier().width(22.dp).height(22.dp))
-            } else {
-                aghsBox("A", p.hasAghsScepter, C_BLUE, C_AGHS, fr)
-            }
-            Box(Modifier().width(4.dp).height(1.dp))
-            if (p.aghsShardIcon != null) {
-                Image(image=p.aghsShardIcon, modifier=Modifier().width(22.dp).height(22.dp))
-            } else {
-                aghsBox("S", p.hasAghsShard, Color.makeRGB(160,120,230), C_SHARD, fr)
-            }
+        // 神杖/魔晶共享原来的 50dp 列宽，改为上下堆叠；魔晶略小并与神杖同轴居中。
+        Column(modifier = Modifier().width(50.dp).height(42.dp), alignment=LayoutAlignment.CENTER) {
+            aghsIcon(p.aghsScepterIcon, "A", p.hasAghsScepter, 22.dp, C_BLUE, C_AGHS, fr)
+            Box(Modifier().width(1.dp).height(2.dp), alignment=LayoutAlignment.CENTER)
+            aghsIcon(p.aghsShardIcon, "S", p.hasAghsShard, 18.dp, Color.makeRGB(160,120,230), C_SHARD, fr)
         }
     }
 }
 
-fun Layout.aghsBox(label: String, has: Boolean, onColor: Int, bgColor: Int, fr: FontRegistry = Fonts.default) {
+fun Layout.aghsIcon(icon: Image?, label: String, has: Boolean, size: Dp, onColor: Int, bgColor: Int, fr: FontRegistry = Fonts.default) {
+    if (icon != null) {
+        Image(image=icon, alignment=LayoutAlignment.CENTER, modifier=Modifier().width(size))
+    } else {
+        aghsBox(label, has, size, onColor, bgColor, fr)
+    }
+}
+
+// A杖/魔晶文字方块兜底。尺寸与真实图标一致，缺图时也不改变列内占位。
+fun Layout.aghsBox(label: String, has: Boolean, size: Dp, onColor: Int, bgColor: Int, fr: FontRegistry = Fonts.default) {
     val ff = fr.textTypeface?.familyName ?: ""
-    Box(Modifier().width(20.dp).height(20.dp).background(if(has) bgColor else C_DIM.withAlpha(0.08f))
-        .border(1.dp, 2.dp, if(has) onColor.withAlpha(0.4f) else C_DIM.withAlpha(0.15f)),
+    Box(Modifier().width(size).height(size).background(if(has) bgColor else C_DIM.withAlpha(0.10f))
+        .border(1.dp, 3.dp, if(has) onColor.withAlpha(0.55f) else C_DIM.withAlpha(0.28f)),
         alignment=LayoutAlignment.CENTER) {
-        Text(text=label, color=if(has) onColor else C_DIM.withAlpha(0.2f), fontSize=10.dp, fontFamily=ff, alignment=LayoutAlignment.CENTER)
+        Text(text=label, color=if(has) onColor else C_DIM.withAlpha(0.55f), fontSize=9.dp, fontFamily=ff, alignment=LayoutAlignment.CENTER)
     }
 }
 
@@ -241,15 +270,33 @@ fun Layout.itemHdr(w: Dp, fr: FontRegistry = Fonts.default) {
     }
 }
 
+// 横向物品图保持原始宽高比；外层仍严格占用 s+4dp，避免挤压后续列。
 fun Layout.itemSlot(icon: Image? = null, s: Dp = 28.dp, neutral: Boolean = false, fr: FontRegistry = Fonts.default) {
     val ff = fr.textTypeface?.familyName ?: ""
     val bc = when { neutral -> C_GOLD.withAlpha(0.3f); s < 28.dp -> C_DIM.withAlpha(0.1f); else -> C_BORDER }
-    val pad = (50.dp - s) / 2f
-    Box(Modifier().width(s).height(s).background(C_ODD.withAlpha(0.3f))
-        .border(1.dp, 4.dp, bc).margin(left=2.dp,right=2.dp,top=pad,bottom=pad),
-        alignment=LayoutAlignment.CENTER) {
-        if (icon != null) Image(image=icon, modifier=Modifier().width(s-1.dp).height(s-1.dp))
-        else Text(text="·", color=C_DIM.withAlpha(0.15f), fontSize=8.dp, fontFamily=ff, alignment=LayoutAlignment.CENTER)
+    val slotH = if (s < 28.dp) 18.dp else 21.dp
+    Box(Modifier().width(s).height(50.dp).margin(left=2.dp,right=2.dp), alignment=LayoutAlignment.CENTER) {
+        Box(Modifier().width(s).height(slotH).background(C_ODD.withAlpha(0.3f))
+            .border(1.dp, 4.dp, bc), alignment=LayoutAlignment.CENTER) {
+            if (icon != null) {
+                // 只限定宽度，由 Image 按素材原始比例计算高度，避免装备图被裁成方形。
+                Image(image=icon, alignment=LayoutAlignment.CENTER, modifier=Modifier().width(s-1.dp))
+            } else {
+                Text(text="·", color=C_DIM.withAlpha(0.24f), fontSize=8.dp, fontFamily=ff, alignment=LayoutAlignment.CENTER)
+            }
+        }
+    }
+}
+
+fun Layout.statusBadge(label: String, accent: Int, width: Dp, height: Dp, fontSize: Dp, fr: FontRegistry = Fonts.default) {
+    val ff = fr.textTypeface?.familyName ?: ""
+    Box(
+        Modifier().width(width).height(height)
+            .background(accent.withAlpha(0.16f))
+            .border(1.dp, 5.dp, accent.withAlpha(0.78f)),
+        alignment=LayoutAlignment.CENTER
+    ) {
+        Text(text=label, color=Color.WHITE, fontSize=fontSize, fontFamily=ff, alignment=LayoutAlignment.CENTER)
     }
 }
 
@@ -273,21 +320,34 @@ fun Layout.analysisBlock(r: Dota2MatchReport, fr: FontRegistry = Fonts.default) 
 fun Layout.aLine(accent: Int, tag: String, name: String, reason: String, heroIcon: Image? = null, fr: FontRegistry = Fonts.default) {
     val ff = fr.textTypeface?.familyName ?: ""
     val stamp = makeStampImage(stampLabel(tag), accent, fr)
-    val tagWidth = when {
-        tag.length >= 5 -> 96.dp
-        tag.length >= 3 -> 64.dp
-        else -> 50.dp
-    }
     Column(Modifier().fillMaxWidth().padding(4.dp, 12.dp, 4.dp, 12.dp)) {
-        Row(Modifier().fillMaxWidth().margin(0.dp, 0.dp, 3.dp, 0.dp), alignment=LayoutAlignment.LEFT) {
-            if (heroIcon != null) {
-                Image(image=heroIcon, modifier=Modifier().width(42.dp).height(24.dp).margin(0.dp, 5.dp, 0.dp, 0.dp))
+        Row(Modifier().fillMaxWidth().height(36.dp).margin(bottom=3.dp), alignment=LayoutAlignment.LEFT) {
+            // 固定每一段的占位。不同长度的标签和名称不再推动右侧印章，且所有元素
+            // 都由 36dp 高的 Box 沿同一条水平中心线摆放。
+            Box(Modifier().width(47.dp).height(36.dp), alignment=LayoutAlignment.CENTER) {
+                if (heroIcon != null) {
+                    Image(image=heroIcon, alignment=LayoutAlignment.CENTER, modifier=Modifier().width(42.dp))
+                } else {
+                    Box(Modifier().width(42.dp).height(24.dp).background(C_BORDER.withAlpha(0.22f))
+                        .border(1.dp, 3.dp, C_DIM.withAlpha(0.28f)), alignment=LayoutAlignment.CENTER)
+                }
             }
-            Box(Modifier().width(tagWidth).height(22.dp).background(accent).border(0.dp,3.dp), alignment=LayoutAlignment.CENTER) {
-                Text(text=tag, color=Color.WHITE, fontSize=12.dp, fontFamily=ff, alignment=LayoutAlignment.CENTER)
+            Box(Modifier().width(96.dp).height(36.dp), alignment=LayoutAlignment.CENTER) {
+                statusBadge(tag, accent, 88.dp, 24.dp, 12.dp, fr)
             }
-            Text(text="  $name", color=C_TXT, fontSize=15.dp, fontFamily=ff, modifier=Modifier().maxWidth(360.dp))
-            Image(image=stamp, modifier=Modifier().width(74.dp).height(34.dp).margin(0.dp, 0.dp, 0.dp, 6.dp))
+            Box(Modifier().width(360.dp).height(36.dp), alignment=LayoutAlignment.LEFT) {
+                Text(
+                    text=name,
+                    color=C_TXT,
+                    fontSize=15.dp,
+                    fontFamily=ff,
+                    alignment=LayoutAlignment.LEFT,
+                    modifier=Modifier().margin(left=8.dp).maxWidth(344.dp)
+                )
+            }
+            Box(Modifier().width(92.dp).height(36.dp), alignment=LayoutAlignment.CENTER) {
+                Image(image=stamp, alignment=LayoutAlignment.CENTER, modifier=Modifier().width(86.dp).height(36.dp))
+            }
         }
         val style = TextStyle().setColor(C_TXT2).setFontSize(13.px).setFontFamily(ff)
         val paragraph = RichParagraphBuilder(style)
