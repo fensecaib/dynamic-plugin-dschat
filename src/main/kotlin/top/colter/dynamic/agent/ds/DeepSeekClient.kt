@@ -3,7 +3,7 @@ package top.colter.dynamic.agent.ds
 import kotlinx.coroutines.delay
 import top.colter.dynamic.agent.util.HttpUtils
 import java.net.http.HttpClient
-import java.net.http.HttpResponse
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration.Companion.seconds
 
 class DeepSeekClient(private val apiKey: String, private val apiUrl: String) {
@@ -49,6 +49,8 @@ class DeepSeekClient(private val apiKey: String, private val apiUrl: String) {
                     RuntimeException("API 请求失败 ($statusCode): $errorBody")
                 )
             } catch (e: Exception) {
+                // 取消属于协程控制流，不能作为可重试的网络失败吞掉。
+                if (e is CancellationException) throw e
                 lastException = e
             }
         }

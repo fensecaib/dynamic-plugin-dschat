@@ -22,11 +22,27 @@ class ChatService(
         val isLong: Boolean,
     )
 
+    data class ChatOptions(
+        val client: DeepSeekClient,
+        val model: String,
+        val systemPrompt: String,
+        val enableWebSearch: Boolean,
+    )
+
     suspend fun chat(
         prompt: String,
         sessionKey: SessionManager.SessionKey,
+        options: ChatOptions? = null,
     ): ChatResult {
-        val systemPrompt = config.chat.systemPrompt
+        val resolved = options ?: ChatOptions(
+            client = dsClient,
+            model = config.api.model,
+            systemPrompt = config.chat.systemPrompt,
+            enableWebSearch = config.webSearch.enabled,
+        )
+        val client = resolved.client
+        val model = resolved.model
+        val systemPrompt = resolved.systemPrompt
 
         val detectedUrls = urlPattern.matcher(prompt).let { matcher ->
             val urls = mutableListOf<String>()
@@ -61,7 +77,11 @@ class ChatService(
 
         val messages = sessionManager.buildMessages(sessionKey, augmentedPrompt, systemPrompt)
 
-        val agent: Agent = AgentRouter.create(config)
+        val agent: Agent = if (resolved.enableWebSearch) {
+            AgentRouter.create(config)
+        } else {
+            top.colter.dynamic.agent.agent.ChatAgent()
+        }
         agent.prepareMessages(messages, augmentedPrompt, systemPrompt)
 
         var round = 0
@@ -69,11 +89,11 @@ class ChatService(
 
         if (!agent.shouldContinue(0)) {
             val request = ChatRequest(
-                model = config.api.model,
+                model = model,
                 messages = messages.toList(),
                 maxTokens = config.chat.maxTokens,
             )
-            val result = dsClient.chat(request)
+            val result = client.chat(request)
             finalContent = result.fold(
                 onSuccess = { it.choices.firstOrNull()?.message?.content ?: "(空回复)" },
                 onFailure = { "请求失败: ${it.message ?: "未知错误"}" }
@@ -82,14 +102,14 @@ class ChatService(
 
         while (agent.shouldContinue(round)) {
             val request = ChatRequest(
-                model = config.api.model,
+                model = model,
                 messages = messages.toList(),
                 maxTokens = config.chat.maxTokens,
                 tools = agent.tools.takeIf { it.isNotEmpty() },
                 toolChoice = if (agent.tools.isNotEmpty()) "auto" else null,
             )
 
-            val result = dsClient.chat(request)
+            val result = client.chat(request)
 
             result.fold(
                 onSuccess = { response ->

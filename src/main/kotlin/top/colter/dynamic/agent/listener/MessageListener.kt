@@ -27,6 +27,16 @@ import top.colter.dynamic.core.plugin.PluginMessagePublishOptions
 import top.colter.skiko.FontRegistry
 import java.io.File
 import java.nio.file.Path
+import kotlin.coroutines.cancellation.CancellationException
+
+/** 仅匹配完整命令前缀，避免将 `/dsa` 识别为 `/ds`。 */
+internal fun commandArgument(message: String, prefix: String): String? {
+    val normalizedPrefix = prefix.trim()
+    if (normalizedPrefix.isEmpty() || !message.startsWith(normalizedPrefix)) return null
+    val remainder = message.substring(normalizedPrefix.length)
+    if (remainder.isNotEmpty() && !remainder.first().isWhitespace()) return null
+    return remainder.trim()
+}
 
 class MessageListener(
     private val config: AgentPluginConfig,
@@ -34,6 +44,7 @@ class MessageListener(
     private val sessionManager: SessionManager,
     private val dota2Service: Dota2Service,
     private val dsClient: DeepSeekClient,
+    private val grokClient: DeepSeekClient?,
     private val imageConfig: ImageConfig,
     private val pluginContext: PluginContext,
     private val dataDir: Path,
@@ -46,47 +57,92 @@ class MessageListener(
         val senderId = ctx.message.senderId
         val replyMsgId = ctx.replyToMessageId
 
-        val sessionKey = SessionManager.SessionKey(targetId = target.stableValue(), senderId = senderId)
+        val baseKey = SessionManager.SessionKey(targetId = target.stableValue(), senderId = senderId)
+        val dsPrefix = config.trigger.triggerPrefix.ifBlank { "/ds" }
+        val grokPrefix = config.grok.triggerPrefix.ifBlank { "/grok" }
+        val dsPrompt = commandArgument(msg, dsPrefix)
+        val grokPrompt = commandArgument(msg, grokPrefix)
+        val dotaPrompt = commandArgument(msg, "/dota")
 
-        if (msg.startsWith("/ds")) {
-            val prompt = msg.removePrefix("/ds").trim()
-            if (prompt in listOf("clear", "重置", "新建对话", "清空上下文")) {
-                sessionManager.clear(sessionKey)
-                sendText(target, "上下文已清空，开始新对话。", replyMsgId)
-                return
-            }
-            if (prompt.isBlank()) {
-                sendText(target, "用法: /ds <问题>", replyMsgId)
-                return
-            }
-            handleChat(prompt, sessionKey, target, replyMsgId)
-        } else if (msg.startsWith("/dota")) {
-            handleDotaCommand(msg.removePrefix("/dota").trim(), target, senderId, replyMsgId)
-        } else if (msg.isNotBlank() && config.trigger.enableAtTrigger) {
+        if (dsPrompt != null) {
+            handleChatCommand(dsPrompt, baseKey, target, replyMsgId, provider = "ds", usage = "用法: $dsPrefix <问题>")
+        } else if (config.grok.enabled && grokPrompt != null) {
+            handleChatCommand(grokPrompt, baseKey.copy(targetId = "${baseKey.targetId}|grok"), target, replyMsgId, provider = "grok", usage = "用法: $grokPrefix <问题>")
+        } else if (dotaPrompt != null) {
+            handleDotaCommand(dotaPrompt, target, senderId, replyMsgId)
+        } else if (msg.isNotBlank()) {
             val botId = ctx.message.botAccountId
             if (botId != null && ctx.message.mentions.contains(botId)) {
-                handleChat(msg, sessionKey, target, replyMsgId)
+                when {
+                    config.grok.enabled && config.grok.useAsAtTrigger ->
+                        handleChat(msg, baseKey.copy(targetId = "${baseKey.targetId}|grok"), target, replyMsgId, provider = "grok")
+                    config.trigger.enableAtTrigger && !config.grok.useAsAtTrigger ->
+                        handleChat(msg, baseKey, target, replyMsgId, provider = "ds")
+                }
             }
         }
     }
 
+    private suspend fun handleChatCommand(
+        prompt: String,
+        sessionKey: SessionManager.SessionKey,
+        target: TargetAddress,
+        replyMsgId: String,
+        provider: String,
+        usage: String,
+    ) {
+        if (prompt in listOf("clear", "重置", "新建对话", "清空上下文")) {
+            sessionManager.clear(sessionKey)
+            sendText(target, "上下文已清空，开始新对话。", replyMsgId)
+            return
+        }
+        if (prompt.isBlank()) {
+            sendText(target, usage, replyMsgId)
+            return
+        }
+        handleChat(prompt, sessionKey, target, replyMsgId, provider)
+    }
+
     private suspend fun handleChat(
-        prompt: String, sessionKey: SessionManager.SessionKey,
-        target: TargetAddress, replyMsgId: String
+        prompt: String,
+        sessionKey: SessionManager.SessionKey,
+        target: TargetAddress,
+        replyMsgId: String,
+        provider: String = "ds",
     ) {
         try {
+            val selectedGrokClient = grokClient
+            if (provider == "grok") {
+                if (!config.grok.enabled) {
+                    sendText(target, "Grok 对话未启用", replyMsgId)
+                    return
+                }
+                if (config.grok.apiKey.isBlank() || selectedGrokClient == null) {
+                    sendText(target, "请先在插件配置中填写 Grok API Key", replyMsgId)
+                    return
+                }
+            }
             sendText(target, "请稍等...", replyMsgId)
-            val result = chatService.chat(prompt, sessionKey)
+            val options = if (provider == "grok") {
+                ChatService.ChatOptions(
+                    client = checkNotNull(selectedGrokClient) { "Grok client was not initialized" },
+                    model = config.grok.model,
+                    systemPrompt = config.grok.systemPrompt.ifBlank { config.chat.systemPrompt },
+                    enableWebSearch = false,
+                )
+            } else null
+            val result = chatService.chat(prompt, sessionKey, options)
 
             if (result.isLong && config.chat.textReplyThreshold > 0) {
                 val image = chatDraw(result.content, imageConfig, fontRegistry)
                 if (image != null) {
-                    sendImage(target, image, "chat_reply.png")
+                    sendImage(target, image, if (provider == "grok") "chat_grok.png" else "chat_reply.png")
                     return
                 }
             }
             sendText(target, result.content, replyMsgId)
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             sendText(target, "请求失败: ${e.message ?: "未知错误"}", replyMsgId)
         }
     }
@@ -127,7 +183,7 @@ class MessageListener(
                     val detail = dota2Service.getMatchDetail(mid)
                     if (detail != null) m to detail else null
                 }
-                val img = dota2OverviewDraw(accountId!!, dota2Service, analysisText, worstDetails, imageConfig, fontRegistry)
+                val img = dota2OverviewDraw(accountId, dota2Service, analysisText, worstDetails, imageConfig, fontRegistry)
                 if (img != null) sendImage(target, img, "dota2_overview.png")
                 else sendText(target, analysisText ?: "分析失败", replyMsgId)
             }
@@ -173,6 +229,7 @@ class MessageListener(
                     if (img != null) sendImage(target, img, "dota2_report_$matchId.png")
                     else sendText(target, "比赛 #$matchId (${if (won) "胜利" else "战败"})\n\n${dsResult?.rawResponse ?: "分析失败"}", replyMsgId)
                 } catch (e: Exception) {
+                    if (e is CancellationException) throw e
                     sendText(target, "战报生成失败: ${e.message}", replyMsgId)
                 }
             }

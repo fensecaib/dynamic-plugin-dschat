@@ -3,6 +3,7 @@ package top.colter.dynamic.agent.agent
 import kotlinx.serialization.json.*
 import org.jsoup.Jsoup
 import top.colter.dynamic.agent.util.HttpUtils
+import kotlin.coroutines.cancellation.CancellationException
 
 object FetchService {
     private val client = HttpUtils.createClient(connectTimeoutSec = 10, requestTimeoutSec = 15)
@@ -29,6 +30,7 @@ object FetchService {
             if (maxChars > 0 && text.length > maxChars) "${text.take(maxChars)}\n\n[...内容过长，已截断]"
             else text
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             "获取页面失败: ${e.message}"
         }
     }
@@ -40,7 +42,7 @@ object FetchService {
                 "iframe, noscript, .sidebar, .advertisement, " +
                 "[role=navigation], [role=banner]").remove()
 
-            (doc.body()?.wholeText() ?: doc.wholeText())
+            doc.body().wholeText()
                 .replace(Regex("\\n{3,}"), "\n\n")
                 .replace(Regex("[\\t ]+"), " ")
                 .trim()
@@ -94,6 +96,7 @@ object FetchService {
                 }
             }
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             urls.map { TavilyResult(it, false) }
         }
     }

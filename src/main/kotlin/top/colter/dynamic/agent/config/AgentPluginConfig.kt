@@ -9,6 +9,7 @@ data class AgentPluginConfig(
     val trigger: TriggerConfig = TriggerConfig(),
     val image: ImageConfig = ImageConfig(),
     val webSearch: WebSearchConfig = WebSearchConfig(),
+    val grok: GrokConfig = GrokConfig(),
     val dota2: Dota2Config = Dota2Config(),
     val weibo: WeiboDrawConfig = WeiboDrawConfig(),
 )
@@ -35,6 +36,17 @@ data class ChatConfig(
 data class TriggerConfig(
     val triggerPrefix: String = "/ds",
     val enableAtTrigger: Boolean = true,
+)
+
+@Serializable
+data class GrokConfig(
+    val enabled: Boolean = false,
+    val apiKey: String = "",
+    val apiUrl: String = "https://g-api.duckdns.org/v1/chat/completions",
+    val model: String = "grok-4.5",
+    val triggerPrefix: String = "/grok",
+    val useAsAtTrigger: Boolean = false,
+    val systemPrompt: String = "你是 Grok，一个有帮助的AI助手。",
 )
 
 @Serializable

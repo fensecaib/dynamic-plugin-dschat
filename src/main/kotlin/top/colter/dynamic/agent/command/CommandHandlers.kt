@@ -27,6 +27,7 @@ import top.colter.dynamic.core.data.MessageBatch
 import top.colter.dynamic.core.data.MessageContent
 import top.colter.dynamic.core.plugin.PluginContext
 import top.colter.skiko.FontRegistry
+import kotlin.coroutines.cancellation.CancellationException
 
 class CommandHandlers(
     private val config: AgentPluginConfig,
@@ -34,12 +35,17 @@ class CommandHandlers(
     private val sessionManager: SessionManager,
     private val dota2Service: Dota2Service,
     private val dsClient: DeepSeekClient,
+    private val grokClient: DeepSeekClient?,
     private val imageConfig: ImageConfig,
     private val pluginContext: PluginContext,
     private val cacheUtils: CacheUtils,
     private val fontRegistry: FontRegistry,
 ) {
-    fun all(): List<CommandHandler> = listOf(DsHandler(), DotaHandler())
+    fun all(): List<CommandHandler> = buildList {
+        add(DsHandler())
+        if (config.grok.enabled) add(GrokHandler())
+        add(DotaHandler())
+    }
 
     private fun ok(text: String) = CommandExecutionResult(CommandStatus.SUCCESS, listOf(MessageBatch(listOf(MessageContent.Text(text)))))
     private fun fail(text: String) = CommandExecutionResult(CommandStatus.REJECTED, listOf(MessageBatch(listOf(MessageContent.Text(text)))))
@@ -51,32 +57,75 @@ class CommandHandlers(
         return CommandExecutionResult(CommandStatus.SUCCESS, listOf(MessageBatch(listOf(MessageContent.Image(fallbackText = "", image = MediaRef(uri = file.absolutePath, kind = MediaKind.IMAGE, mimeType = "image/png"))))))
     }
 
-    inner class DsHandler : CommandHandler {
-        override val spec = CommandSpec(path = listOf("ds"),             aliases = listOf(listOf("chat")), description = "DeepSeek AI对话")
-
-        override suspend fun handle(inv: CommandInvocation): CommandExecutionResult {
-            val prompt = inv.args.joinToString(" ").trim()
-            val key = SessionManager.SessionKey(inv.context.target.stableValue(), inv.context.senderId)
-
-            if (prompt in listOf("clear", "重置", "新建对话", "清空上下文")) { sessionManager.clear(key); return ok("上下文已清空") }
-            if (prompt.isBlank()) return fail("用法: /ds <问题>")
-
-            return try {
-                val result = chatService.chat(prompt, key)
-                if (result.isLong && config.chat.textReplyThreshold > 0) {
-                    val img = chatDraw(result.content, imageConfig, fontRegistry)
-                    if (img != null) return imageResult(img, "chat_ds.png")
+    private suspend fun handleLlmChat(
+        prompt: String,
+        key: SessionManager.SessionKey,
+        provider: String,
+        usage: String,
+    ): CommandExecutionResult {
+        if (prompt in listOf("clear", "重置", "新建对话", "清空上下文")) {
+            sessionManager.clear(key)
+            return ok("上下文已清空")
+        }
+        if (prompt.isBlank()) return fail(usage)
+        return try {
+            val options = if (provider == "grok") {
+                if (config.grok.apiKey.isBlank() || grokClient == null) {
+                    return fail("请先在插件配置中填写 Grok API Key")
                 }
-                ok(result.content)
-            } catch (e: Exception) { fail("请求失败: ${e.message}") }
+                ChatService.ChatOptions(
+                    client = grokClient,
+                    model = config.grok.model,
+                    systemPrompt = config.grok.systemPrompt.ifBlank { config.chat.systemPrompt },
+                    enableWebSearch = false,
+                )
+            } else null
+            val result = chatService.chat(prompt, key, options)
+            if (result.isLong && config.chat.textReplyThreshold > 0) {
+                val img = chatDraw(result.content, imageConfig, fontRegistry)
+                if (img != null) return imageResult(img, if (provider == "grok") "chat_grok.png" else "chat_ds.png")
+            }
+            ok(result.content)
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            fail("请求失败: ${e.message}")
+        }
+    }
+
+    inner class DsHandler : CommandHandler {
+        override val spec = CommandSpec(
+            path = listOf(config.trigger.triggerPrefix.removePrefix("/").ifBlank { "ds" }),
+            aliases = listOf(listOf("chat")),
+            description = "DeepSeek AI对话",
+        )
+
+        override suspend fun handle(invocation: CommandInvocation): CommandExecutionResult {
+            val prompt = invocation.args.joinToString(" ").trim()
+            val key = SessionManager.SessionKey(invocation.context.target.stableValue(), invocation.context.senderId)
+            return handleLlmChat(prompt, key, "ds", "用法: ${config.trigger.triggerPrefix.ifBlank { "/ds" }} <问题>")
+        }
+    }
+
+    inner class GrokHandler : CommandHandler {
+        override val spec = CommandSpec(
+            path = listOf(config.grok.triggerPrefix.removePrefix("/").ifBlank { "grok" }),
+            aliases = emptyList(),
+            description = "Grok AI对话",
+        )
+
+        override suspend fun handle(invocation: CommandInvocation): CommandExecutionResult {
+            if (!config.grok.enabled) return fail("Grok 对话未启用")
+            val prompt = invocation.args.joinToString(" ").trim()
+            val key = SessionManager.SessionKey("${invocation.context.target.stableValue()}|grok", invocation.context.senderId)
+            return handleLlmChat(prompt, key, "grok", "用法: ${config.grok.triggerPrefix.ifBlank { "/grok" }} <问题>")
         }
     }
 
     inner class DotaHandler : CommandHandler {
         override val spec = CommandSpec(path = listOf("dota"),             aliases = listOf(listOf("d2")), description = "Dota2战报分析")
 
-        override suspend fun handle(inv: CommandInvocation): CommandExecutionResult {
-            val args = inv.args; val sid = inv.context.senderId
+        override suspend fun handle(invocation: CommandInvocation): CommandExecutionResult {
+            val args = invocation.args; val sid = invocation.context.senderId
             return when {
                 args.size == 2 && args[0] == "绑定" -> handleBind(args[1], sid)
                 args.size == 1 && args[0] == "历史" -> handleHistory(sid)
@@ -113,7 +162,7 @@ class CommandHandlers(
                 val detail = dota2Service.getMatchDetail(mid)
                 if (detail != null) m to detail else null
             }
-            val img = dota2OverviewDraw(aid!!, dota2Service, analysisText, worstDetails, imageConfig, fontRegistry)
+            val img = dota2OverviewDraw(aid, dota2Service, analysisText, worstDetails, imageConfig, fontRegistry)
             if (img != null) return imageResult(img, "dota2_overview.png")
             return ok(analysisText ?: "分析失败")
         }
