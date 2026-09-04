@@ -2,6 +2,8 @@ package top.colter.dynamic.agent.dota2
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.*
 import org.jetbrains.skia.Image
 import top.colter.dynamic.agent.ds.ChatMessage
@@ -12,11 +14,16 @@ import top.colter.dynamic.agent.util.CacheType
 import top.colter.dynamic.agent.util.CacheUtils
 import top.colter.dynamic.agent.util.HttpUtils
 import java.io.File
+import kotlin.coroutines.cancellation.CancellationException
 
 class Dota2Service(
     private val dataDir: File,
     private val cache: CacheUtils,
 ) {
+    private fun Exception.rethrowIfCancellation() {
+        if (this is CancellationException) throw this
+    }
+
     companion object {
         private const val API_BASE = "https://api.opendota.com/api"
         private const val CDN_BASE = "https://cdn.cloudflare.steamstatic.com"
@@ -82,8 +89,13 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
     private val heroNames = mutableMapOf<Int, String>()
     private val heroIconPaths = mutableMapOf<Int, String>()
     private val itemIconPaths = mutableMapOf<Int, String>()
-    private var constantsLoaded = false
+    private val constantsMutex = Mutex()
+    @Volatile
+    private var heroConstantsLoaded = false
+    @Volatile
+    private var itemConstantsLoaded = false
 
+    private val aghsIconsMutex = Mutex()
     private var aghsScepterYes: Image? = null
     private var aghsScepterNo: Image? = null
     private var aghsShardYes: Image? = null
@@ -120,7 +132,10 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
             if (resp.statusCode() !in 200..299) return null
             val data = HttpUtils.json.decodeFromString(JsonObject.serializer(), resp.body())
             data["profile"]?.jsonObject?.get("personaname")?.jsonPrimitive?.content
-        } catch (_: Exception) { null }
+        } catch (e: Exception) {
+            e.rethrowIfCancellation()
+            null
+        }
     }
 
     suspend fun getRecentMatches(accountId: Long, limit: Int = 1): JsonArray? {
@@ -129,7 +144,10 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
                 params = mapOf("limit" to limit.toString()))
             if (resp.statusCode() !in 200..299) return null
             HttpUtils.json.decodeFromString(JsonArray.serializer(), resp.body())
-        } catch (_: Exception) { null }
+        } catch (e: Exception) {
+            e.rethrowIfCancellation()
+            null
+        }
     }
 
     suspend fun getMatchDetail(matchId: Long): JsonObject? {
@@ -137,35 +155,64 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
             val resp = HttpUtils.httpGet("$API_BASE/matches/$matchId")
             if (resp.statusCode() !in 200..299) return null
             HttpUtils.json.decodeFromString(JsonObject.serializer(), resp.body())
-        } catch (_: Exception) { null }
+        } catch (e: Exception) {
+            e.rethrowIfCancellation()
+            null
+        }
     }
 
+    /**
+     * 初始化 OpenDota 英雄与物品常量。
+     *
+     * 两类数据分别记录完成状态：并发调用只会执行一次初始化，任一接口暂时失败时，
+     * 后续请求只重试失败的部分，不会清空已经可用的名称和图标路径。
+     */
     suspend fun ensureConstants() {
-        if (constantsLoaded) return
-        try {
-            val heroResp = HttpUtils.httpGet("$API_BASE/constants/heroes")
-            if (heroResp.statusCode() in 200..299) {
-                val heroObj = HttpUtils.json.decodeFromString(JsonObject.serializer(), heroResp.body())
-                heroObj.forEach { (_, v) ->
-                    val hero = v.jsonObject
-                    val id = hero["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
-                    heroNames[id] = hero["localized_name"]?.jsonPrimitive?.content ?: "Hero_$id"
-                    val img = hero["img"]?.jsonPrimitive?.content?.substringBefore("?") ?: ""
-                    if (img.isNotEmpty()) heroIconPaths[id] = img
+        if (heroConstantsLoaded && itemConstantsLoaded) return
+        constantsMutex.withLock {
+            if (!heroConstantsLoaded) {
+                try {
+                    val heroResp = HttpUtils.httpGet("$API_BASE/constants/heroes")
+                    if (heroResp.statusCode() in 200..299) {
+                        val heroObj = HttpUtils.json.decodeFromString(JsonObject.serializer(), heroResp.body())
+                        if (heroObj.isNotEmpty()) {
+                            heroObj.forEach { (_, v) ->
+                                val hero = v.jsonObject
+                                val id = hero["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+                                heroNames[id] = hero["localized_name"]?.jsonPrimitive?.content ?: "Hero_$id"
+                                val img = hero["img"]?.jsonPrimitive?.content?.substringBefore("?") ?: ""
+                                if (img.isNotEmpty()) heroIconPaths[id] = img
+                            }
+                            heroConstantsLoaded = true
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.rethrowIfCancellation()
+                    // 保留已加载的数据，下次请求时仅重试尚未成功的常量类型。
                 }
             }
-            val itemResp = HttpUtils.httpGet("$API_BASE/constants/items")
-            if (itemResp.statusCode() in 200..299) {
-                val itemObj = HttpUtils.json.decodeFromString(JsonObject.serializer(), itemResp.body())
-                itemObj.forEach { (_, v) ->
-                    val item = v.jsonObject
-                    val id = item["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
-                    val img = item["img"]?.jsonPrimitive?.content?.substringBefore("?") ?: ""
-                    if (img.isNotEmpty()) itemIconPaths[id] = img
+
+            if (!itemConstantsLoaded) {
+                try {
+                    val itemResp = HttpUtils.httpGet("$API_BASE/constants/items")
+                    if (itemResp.statusCode() in 200..299) {
+                        val itemObj = HttpUtils.json.decodeFromString(JsonObject.serializer(), itemResp.body())
+                        if (itemObj.isNotEmpty()) {
+                            itemObj.forEach { (_, v) ->
+                                val item = v.jsonObject
+                                val id = item["id"]?.jsonPrimitive?.intOrNull ?: return@forEach
+                                val img = item["img"]?.jsonPrimitive?.content?.substringBefore("?") ?: ""
+                                if (img.isNotEmpty()) itemIconPaths[id] = img
+                            }
+                            itemConstantsLoaded = true
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.rethrowIfCancellation()
+                    // 英雄和物品常量独立重试，避免一个接口失败阻断另一个接口。
                 }
             }
-        } catch (_: Exception) {}
-        constantsLoaded = true
+        }
     }
 
     fun heroName(id: Int) = localizedDota2HeroName(id, heroNames[id])
@@ -192,18 +239,36 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
         return try {
             val resp = HttpUtils.httpGetBytes(url)
             if (resp.statusCode() in 200..299 && resp.body().size > 512) resp.body() else null
-        } catch (_: Exception) { null }
+        } catch (e: Exception) {
+            e.rethrowIfCancellation()
+            null
+        }
     }
 
     // ── Aghanim icons ────────────────────────────
 
+    /**
+     * 并行加载神杖、魔晶的已购买与未购买图标。
+     *
+     * 四项全部成功后直接复用；若只有部分资源失败，后续调用仅补齐缺失项。
+     */
     suspend fun ensureAghsIcons() {
-        if (aghsScepterNo != null) return
-        val base = "https://www.opendota.com/assets/images/dota2"
-        aghsScepterYes = downloadDirect("$base/scepter_1.png")
-        aghsScepterNo  = downloadDirect("$base/scepter_0.png")
-        aghsShardYes   = downloadDirect("$base/shard_1.png")
-        aghsShardNo    = downloadDirect("$base/shard_0.png")
+        aghsIconsMutex.withLock {
+            if (aghsScepterYes != null && aghsScepterNo != null && aghsShardYes != null && aghsShardNo != null) {
+                return@withLock
+            }
+            val base = "https://www.opendota.com/assets/images/dota2"
+            coroutineScope {
+                val scepterYes = async { aghsScepterYes ?: downloadDirect("$base/scepter_1.png") }
+                val scepterNo = async { aghsScepterNo ?: downloadDirect("$base/scepter_0.png") }
+                val shardYes = async { aghsShardYes ?: downloadDirect("$base/shard_1.png") }
+                val shardNo = async { aghsShardNo ?: downloadDirect("$base/shard_0.png") }
+                aghsScepterYes = scepterYes.await()
+                aghsScepterNo = scepterNo.await()
+                aghsShardYes = shardYes.await()
+                aghsShardNo = shardNo.await()
+            }
+        }
     }
 
     fun getAghsIcon(has: Boolean, isShard: Boolean): Image? {
@@ -216,7 +281,10 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
             val bytes = downloadBytes(url) ?: return null
             if (bytes.size < 512) return null
             return Image.makeFromEncoded(bytes)
-        } catch (_: Exception) { return null }
+        } catch (e: Exception) {
+            e.rethrowIfCancellation()
+            return null
+        }
     }
 
     // ── Player Overview ──────────────────────────
@@ -300,7 +368,10 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
                 rankedWins = rkw, rankedGames = rkg,
                 normalWins = nmw, normalGames = nmg,
             )
-        } catch (_: Exception) { return null }
+        } catch (e: Exception) {
+            e.rethrowIfCancellation()
+            return null
+        }
     }
 
     fun buildAnalysisData(ov: PlayerOverview): String {
@@ -438,12 +509,17 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
         )
     }
 
+    /**
+     * 并行分析两个阵营。结果容器始终返回，某个阵营请求失败时仅对应字段为空。
+     */
     suspend fun analyzeFullMatch(
         matchJson: JsonObject, dsClient: DeepSeekClient, model: String
-    ): DualAnalyzeResult? {
-        val radiantResult = analyzeTeamSide(0, matchJson, dsClient, model)
-        val direResult = analyzeTeamSide(1, matchJson, dsClient, model)
-        return DualAnalyzeResult(radiantResult, direResult)
+    ): DualAnalyzeResult = coroutineScope {
+        // 两个阵营的数据和模型调用彼此独立，并行执行可将全场分析等待时间
+        // 从两次请求耗时之和降为较慢一次请求的耗时。
+        val radiantResult = async { analyzeTeamSide(0, matchJson, dsClient, model) }
+        val direResult = async { analyzeTeamSide(1, matchJson, dsClient, model) }
+        DualAnalyzeResult(radiantResult.await(), direResult.await())
     }
 
     private suspend fun analyzeTeamSide(
