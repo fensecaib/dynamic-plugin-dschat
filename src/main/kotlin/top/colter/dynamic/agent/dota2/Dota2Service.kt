@@ -168,7 +168,7 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
         constantsLoaded = true
     }
 
-    fun heroName(id: Int) = heroNames[id] ?: "Hero_$id"
+    fun heroName(id: Int) = localizedDota2HeroName(id, heroNames[id])
 
     // ── Icon loading ─────────────────────────────
 
@@ -228,7 +228,11 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
             val pl = HttpUtils.json.decodeFromString(JsonObject.serializer(), plResp.body())
 
             val wlResp = HttpUtils.httpGet("$API_BASE/players/$accountId/wl")
-            val wl = if (wlResp.statusCode() in 200..299) HttpUtils.json.decodeFromString(JsonObject.serializer(), wlResp.body()) else null ?: return null
+            val wl = if (wlResp.statusCode() in 200..299) {
+                HttpUtils.json.decodeFromString(JsonObject.serializer(), wlResp.body())
+            } else {
+                return null
+            }
 
             val totsResp = HttpUtils.httpGet("$API_BASE/players/$accountId/totals")
             val tots = if (totsResp.statusCode() in 200..299) HttpUtils.json.decodeFromString(JsonArray.serializer(), totsResp.body()) else JsonArray(emptyList())
@@ -406,7 +410,7 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
             val gpmPct = bm?.get("gold_per_min")?.jsonObject?.get("pct")?.jsonPrimitive?.doubleOrNull
             val dmgPct = bm?.get("hero_damage_per_min")?.jsonObject?.get("pct")?.jsonPrimitive?.doubleOrNull
             val twrPctVal = bm?.get("tower_damage")?.jsonObject?.get("pct")?.jsonPrimitive?.doubleOrNull
-            sb.appendLine("${obj["personaname"]?.jsonPrimitive?.content ?: "?"} | " +
+            sb.appendLine("${playerDisplayName(obj)} | " +
                 "${heroName(obj["hero_id"]?.jsonPrimitive?.intOrNull ?: 0)} | " +
                 "$k/$d/$a | ${"%.1f".format(kda)} | " +
                 "${obj["gold_per_min"]?.jsonPrimitive?.intOrNull ?: 0} | " +
@@ -472,7 +476,7 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
             val gpmPct = bm?.get("gold_per_min")?.jsonObject?.get("pct")?.jsonPrimitive?.doubleOrNull
             val dmgPct = bm?.get("hero_damage_per_min")?.jsonObject?.get("pct")?.jsonPrimitive?.doubleOrNull
             val twrPctVal = bm?.get("tower_damage")?.jsonObject?.get("pct")?.jsonPrimitive?.doubleOrNull
-            sb.appendLine("${obj["personaname"]?.jsonPrimitive?.content ?: "?"} | " +
+            sb.appendLine("${playerDisplayName(obj)} | " +
                 "${heroName(obj["hero_id"]?.jsonPrimitive?.intOrNull ?: 0)} | " +
                 "$k/$d/$a | ${"%.1f".format(kda)} | " +
                 "${obj["gold_per_min"]?.jsonPrimitive?.intOrNull ?: 0} | " +
@@ -642,8 +646,8 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
         val isRadiant = obj["isRadiant"]?.jsonPrimitive?.boolean ?: true
 
         return Dota2PlayerCard(
-            name = obj["personaname"]?.jsonPrimitive?.content?.ifEmpty { "?" } ?: "?",
-            heroName = heroName(heroId), heroIcon = loadHeroIcon(heroId),
+            name = playerDisplayName(obj),
+            heroName = heroName(heroId), heroId = heroId, heroIcon = loadHeroIcon(heroId),
             isRadiant = isRadiant,
             kills = obj["kills"]?.jsonPrimitive?.intOrNull ?: 0,
             deaths = obj["deaths"]?.jsonPrimitive?.intOrNull ?: 0,
@@ -675,17 +679,18 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
     private fun findAnalysisCard(cards: List<Dota2PlayerCard>, name: String?): Dota2PlayerCard? {
         if (name.isNullOrBlank()) return null
         return cards.firstOrNull { card ->
-            val playerName = card.name.takeIf { it.isNotBlank() && it != "?" }
+            val playerName = card.name.takeUnless(::isAnonymousDota2PlayerName)
             val heroName = card.heroName.takeIf { it.isNotBlank() }
-            (playerName != null && (playerName in name || name in playerName)) ||
-                (heroName != null && (heroName in name || name in heroName))
+            val englishHeroName = heroNames[card.heroId]?.takeIf { it.isNotBlank() }
+            matchesDota2AnalysisIdentity(name, playerName) ||
+                matchesDota2AnalysisIdentity(name, heroName) ||
+                matchesDota2AnalysisIdentity(name, englishHeroName)
         }
     }
 
     private fun analysisDisplayName(card: Dota2PlayerCard?, fallback: String?): String {
         if (card != null) {
-            val playerName = card.name.takeIf { it.isNotBlank() && it != "?" }
-            return if (playerName != null) "${card.heroName}($playerName)" else card.heroName
+            return "${card.heroName}(${normalizeDota2PlayerName(card.name)})"
         }
         return fallback?.take(30)?.ifBlank { "?" } ?: "?"
     }
@@ -708,9 +713,16 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
 
     private fun nameContains(name: String?, obj: JsonObject): Boolean {
         if (name.isNullOrBlank()) return false
-        val personaname = obj["personaname"]?.jsonPrimitive?.content ?: ""
-        val hn = heroName(obj["hero_id"]?.jsonPrimitive?.intOrNull ?: 0)
-        return personaname.isNotEmpty() && personaname in name
-            || hn.isNotEmpty() && hn in name
+        val heroId = obj["hero_id"]?.jsonPrimitive?.intOrNull ?: 0
+        val personaname = playerDisplayName(obj).takeUnless(::isAnonymousDota2PlayerName)
+        val localizedHeroName = heroName(heroId)
+        val englishHeroName = heroNames[heroId]
+        return matchesDota2AnalysisIdentity(name, personaname) ||
+            matchesDota2AnalysisIdentity(name, localizedHeroName) ||
+            matchesDota2AnalysisIdentity(name, englishHeroName)
     }
+
+    private fun playerDisplayName(obj: JsonObject): String = normalizeDota2PlayerName(
+        obj["personaname"]?.jsonPrimitive?.contentOrNull
+    )
 }

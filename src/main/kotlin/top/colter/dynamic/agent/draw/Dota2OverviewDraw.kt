@@ -86,7 +86,7 @@ fun Layout.ovrMatchRow(idx: Int, obj: JsonObject, icons: Map<Int, Image?>, ds: D
     val won = (slot < 128) == rw
     val bg = if (won) C_GREEN.withAlpha(0.06f) else C_RED.withAlpha(0.06f)
     val hid = obj["hero_id"]?.jsonPrimitive?.intOrNull ?: 0
-    val hn = cnHero(hid, ds)
+    val hn = ds.heroName(hid)
     val k = obj["kills"]?.jsonPrimitive?.intOrNull ?: 0
     val d = kotlin.math.max(1, obj["deaths"]?.jsonPrimitive?.intOrNull ?: 1)
     val a = obj["assists"]?.jsonPrimitive?.intOrNull ?: 0
@@ -146,7 +146,7 @@ fun Layout.ovrMatchRow(idx: Int, obj: JsonObject, icons: Map<Int, Image?>, ds: D
 fun Layout.heroMatchCard(obj: JsonObject, icons: Map<Int, Image?>, itemIcons: Map<Int, Image?>, detail: JsonObject, accountId: Long, ds: Dota2Service, fr: FontRegistry = Fonts.default) {
     val ff = fr.textTypeface?.familyName ?: ""
     val hid = obj["hero_id"]?.jsonPrimitive?.intOrNull ?: 0
-    val hn = cnHero(hid, ds)
+    val hn = ds.heroName(hid)
     val k = obj["kills"]?.jsonPrimitive?.intOrNull ?: 0
     val d = kotlin.math.max(1, obj["deaths"]?.jsonPrimitive?.intOrNull ?: 1)
     val a = obj["assists"]?.jsonPrimitive?.intOrNull ?: 0
@@ -314,31 +314,3 @@ private fun ovrTs(ts: Long): String {
 }
 private fun kdaC(k: Double): Int = when { k >= 3.0 -> C_GREEN; k >= 1.5 -> C_GOLD; else -> C_RED }
 private fun fmtK(n: Int): String = when { n >= 100000 -> "${n / 1000}k"; n >= 10000 -> String.format("%.1f", n / 1000.0) + "k"; else -> "$n" }
-
-private val HERO_CN = mapOf(
-    1 to "敌法",2 to "斧王",3 to "Bane",4 to "血魔",5 to "冰女",6 to "小黑",
-    7 to "牛头",8 to "剑圣",9 to "白虎",10 to "水人",11 to "影魔",12 to "猴子",
-    13 to "帕克",14 to "屠夫",15 to "剃刀",16 to "沙王",17 to "蓝猫",18 to "斯温",
-    19 to "小小",20 to "VS",21 to "风行",22 to "宙斯",23 to "船长",25 to "火女",
-    26 to "莱恩",27 to "小Y",28 to "大鱼",29 to "潮汐",30 to "巫医",31 to "巫妖",
-    32 to "隐刺",33 to "谜团",34 to "TK",35 to "先知",36 to "DP",37 to "术士",
-    38 to "兽王",39 to "女王",40 to "剧毒",41 to "虚空",42 to "骷髅王",
-    43 to "LOA",44 to "PA",45 to "帕吉",46 to "TA",47 to "毒龙",
-    48 to "月骑",49 to "龙骑",50 to "戴泽",51 to "发条",52 to "老鹿",
-    53 to "先知",54 to "大树",55 to "黑贤",56 to "小骷髅",57 to "全能",
-    58 to "小鹿",59 to "哈斯卡",60 to "夜魔",61 to "蜘蛛",62 to "赏金",
-    63 to "蚂蚁",64 to "双头龙",65 to "蝙蝠",66 to "陈",67 to "幽鬼",
-    68 to "冰魂",69 to "末日",70 to "拍拍",71 to "白牛",72 to "米波",
-    73 to "炼金",74 to "卡尔",75 to "沉默",76 to "黑鸟",77 to "狼人",
-    78 to "酒仙",79 to "毒狗",80 to "德鲁伊",81 to "混沌",82 to "地卜",
-    83 to "大树",84 to "蓝胖",85 to "尸王",86 to "拉比克",87 to "萨尔",
-    88 to "小强",89 to "小娜迦",90 to "光法",91 to "精灵",92 to "死灵龙",
-    93 to "小鱼",94 to "美杜莎",95 to "巨魔",96 to "人马",97 to "猛犸",
-    98 to "伐木机",99 to "钢背",100 to "火猫",101 to "天怒",102 to "亚巴顿",
-    103 to "大牛",104 to "军团",105 to "炸弹",106 to "大魔导",107 to "海民",
-    108 to "TK",109 to "电狗",110 to "凤凰",111 to "神谕",112 to "冰龙",
-    113 to "紫猫",114 to "滚滚",119 to "玛尔斯",120 to "森海飞霞",121 to "破晓辰星",
-    123 to "邪影芳灵",126 to "大圣",128 to "墨客",129 to "玛西",135 to "琼英碧灵",
-    137 to "凯恩",138 to "莫提姆"
-)
-fun cnHero(id: Int, ds: Dota2Service) = HERO_CN[id] ?: ds.heroName(id)
