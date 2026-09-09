@@ -6,7 +6,7 @@ plugins {
 apply(from = "gradle/dynamic-plugin-fatjar.gradle.kts")
 
 group = "top.colter.dynamic"
-version = "0.0.2"
+version = "0.0.3"
 
 repositories {
     mavenLocal()
@@ -36,6 +36,18 @@ dependencies {
     testImplementation(kotlin("test"))
     testImplementation("top.colter.dynamic:dynamic-bot-core:$coreVersion")
     testImplementation("io.github.oshai:kotlin-logging-jvm:$kotlinLoggingVersion")
+    // 仅供本地战绩绘图快照测试使用；生产插件仍由宿主提供 Skia。
+    testImplementation("org.jetbrains.skiko:skiko-awt:0.148.1")
+    testImplementation("top.colter.skiko:skiko-layout:0.0.9")
+    val testOs = System.getProperty("os.name").lowercase().let {
+        when {
+            it.contains("win") -> "windows"
+            it.contains("mac") -> "macos"
+            else -> "linux"
+        }
+    }
+    val testArch = if (System.getProperty("os.arch") in listOf("aarch64", "arm64")) "arm64" else "x64"
+    testRuntimeOnly("org.jetbrains.skiko:skiko-awt-runtime-$testOs-$testArch:0.148.1")
 }
 
 tasks.test {

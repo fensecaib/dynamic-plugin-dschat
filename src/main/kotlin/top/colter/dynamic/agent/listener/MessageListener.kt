@@ -6,14 +6,23 @@ import top.colter.dynamic.agent.chat.ChatService
 import top.colter.dynamic.agent.chat.SessionManager
 import top.colter.dynamic.agent.config.AgentPluginConfig
 import top.colter.dynamic.agent.config.ImageConfig
+import top.colter.dynamic.agent.dota2.Dota2ReportMode
+import top.colter.dynamic.agent.dota2.reportBusyMessage
+import top.colter.dynamic.agent.dota2.dotaCommandHelp
 import top.colter.dynamic.agent.dota2.Dota2Service
 import top.colter.dynamic.agent.dota2.PlayerOverview
+import top.colter.dynamic.agent.dota2.resolveDotaReportMatchId
+import top.colter.dynamic.agent.dota2.historyCommandHint
+import top.colter.dynamic.agent.dota2.historyTextFallback
+import top.colter.dynamic.agent.dota2.measureDotaStage
 import top.colter.dynamic.agent.ds.DeepSeekClient
 import top.colter.dynamic.agent.draw.chatDraw
 import top.colter.dynamic.agent.draw.dota2MatchDraw
 import top.colter.dynamic.agent.draw.dota2HistoryDraw
 import top.colter.dynamic.agent.draw.dota2FullAnalyzeDraw
 import top.colter.dynamic.agent.draw.dota2OverviewDraw
+import top.colter.dynamic.agent.util.cacheRenderedImage
+import top.colter.dynamic.agent.util.requireAccepted
 import top.colter.dynamic.agent.util.CacheType
 import top.colter.dynamic.agent.util.CacheUtils
 import top.colter.dynamic.core.data.MediaKind
@@ -150,7 +159,7 @@ class MessageListener(
     private suspend fun handleDotaCommand(
         cmd: String, target: TargetAddress, senderId: String, replyMsgId: String
     ) {
-        val parts = cmd.split(" ", "\u3000").filter { it.isNotBlank() }
+        val parts = cmd.split(Regex("[\\s\\u3000]+")).filter { it.isNotBlank() }
 
         when {
             parts.size == 2 && parts[0] == "绑定" -> {
@@ -165,10 +174,10 @@ class MessageListener(
                 val accountId = dota2Service.getBinding(senderId) ?: kotlin.run { sendText(target, "请先绑定账号", replyMsgId); return }
                 val matches = dota2Service.getRecentMatches(accountId, 10)
                 if (matches.isNullOrEmpty()) { sendText(target, "未找到对局记录", replyMsgId); return }
-                val ids = matches.map { it.jsonObject["match_id"]?.jsonPrimitive?.content ?: "?" }
-                sendText(target, "最近${matches.size}场: ${ids.joinToString(" ")}", replyMsgId)
-                val img = dota2HistoryDraw(accountId, matches, imageConfig, fontRegistry)
+                val img = dota2HistoryDraw(accountId, matches, imageConfig, fontRegistry, dota2Service)
                 if (img != null) sendImage(target, img, "dota2_history.png")
+                else sendText(target, historyTextFallback(matches), replyMsgId)
+                sendText(target, historyCommandHint(matches.size), replyMsgId)
             }
             parts.isNotEmpty() && parts[0] == "个人详情" -> {
                 val accountId = if (parts.size >= 2) parts[1].toLongOrNull() else dota2Service.getBinding(senderId)
@@ -204,36 +213,37 @@ class MessageListener(
                     sendText(target, sb.toString(), replyMsgId)
                 }
             }
-            parts.size in 1..2 && parts[0] == "战报" -> {
-                val accountId = dota2Service.getBinding(senderId) ?: kotlin.run { sendText(target, "请先绑定账号", replyMsgId); return }
-                val matchId: Long = parts.getOrNull(1)?.toLongOrNull() ?: kotlin.run {
-                    val ms = dota2Service.getRecentMatches(accountId, 1)
-                    if (ms.isNullOrEmpty()) return@run null
-                    ms[0].jsonObject["match_id"]?.jsonPrimitive?.long
-                } ?: kotlin.run { sendText(target, "未找到最近对局", replyMsgId); return }
-
+            parts.size in 1..2 && Dota2ReportMode.fromCommand(parts[0]) != null -> dota2Service.reportTasks.runIfIdle(onBusy = { sendText(target, reportBusyMessage, replyMsgId) }) {
                 try {
-                    val detail = dota2Service.getMatchDetail(matchId) ?: kotlin.run { sendText(target, "获取比赛详情失败", replyMsgId); return }
+                    val mode = requireNotNull(Dota2ReportMode.fromCommand(parts[0]))
+                    val accountId = dota2Service.getBinding(senderId) ?: kotlin.run { sendText(target, "请先绑定账号", replyMsgId); return@runIfIdle }
+                    val matchId = try {
+                        resolveDotaReportMatchId(parts.getOrNull(1), mode) { dota2Service.getRecentMatches(accountId, 10) }
+                    } catch (e: IllegalArgumentException) {
+                        sendText(target, e.message ?: "参数无效", replyMsgId); return@runIfIdle
+                    }
+
+                    val detail = measureDotaStage(matchId, "detail", mode) { dota2Service.getMatchDetail(matchId) } ?: kotlin.run { sendText(target, "获取比赛详情失败", replyMsgId); return@runIfIdle }
                     val players = detail["players"]?.jsonArray
                     if (players == null || players.none { it.jsonObject["account_id"]?.jsonPrimitive?.longOrNull == accountId }) {
-                        sendText(target, "该比赛中未找到你的账号", replyMsgId); return
+                        sendText(target, "该比赛中未找到你的账号", replyMsgId); return@runIfIdle
                     }
                     val me = players.find { it.jsonObject["account_id"]?.jsonPrimitive?.longOrNull == accountId }!!
                     val isRadiant = me.jsonObject["isRadiant"]?.jsonPrimitive?.boolean ?: false
                     val radiantWin = detail["radiant_win"]?.jsonPrimitive?.boolean ?: false
                     val won = (isRadiant == radiantWin)
-                    sendText(target, "正在分析比赛 #$matchId ...", replyMsgId)
-                    val dsResult = dota2Service.analyzeMatch(accountId, detail, dsClient, config.api.model)
-                    val report = dota2Service.buildReport(detail, accountId, dsResult, won)
-                    val img = dota2MatchDraw(report, imageConfig, fontRegistry)
-                    if (img != null) sendImage(target, img, "dota2_report_$matchId.png")
-                    else sendText(target, "比赛 #$matchId (${if (won) "胜利" else "战败"})\n\n${dsResult?.rawResponse ?: "分析失败"}", replyMsgId)
+                    sendText(target, mode.progressText(matchId), replyMsgId)
+                    dota2Service.generateMatchReport(detail, accountId, dsClient, config.api.model, won, mode).use { generated ->
+                        val img = measureDotaStage(matchId, "draw", mode) { dota2MatchDraw(generated.report, imageConfig, fontRegistry) }
+                        if (img != null) measureDotaStage(matchId, "encode_and_send", mode) { sendImage(target, img, "dota2_report_${matchId}_${mode.name.lowercase()}.png") }
+                        else sendText(target, "比赛 #$matchId (${if (won) "胜利" else "战败"})\n\n${generated.analysis?.rawResponse ?: "分析失败"}", replyMsgId)
+                    }
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
-                    sendText(target, "战报生成失败: ${e.message}", replyMsgId)
+                    sendText(target, "战报生成或发送失败: ${e.message ?: "未知错误"}", replyMsgId)
                 }
             }
-            else -> sendText(target, "用法:\n/dota 绑定 <9位ID>\n/dota 历史\n/dota 战报\n/dota 战报 <比赛ID>\n/dota 分析 <比赛ID>\n/dota 个人详情", replyMsgId)
+            else -> sendText(target, dotaCommandHelp, replyMsgId)
         }
     }
 
@@ -251,14 +261,12 @@ class MessageListener(
     }
 
     private suspend fun sendText(target: TargetAddress, text: String, replyTo: String = "") {
-        pluginContext.messagePublisher.sendText(target, text, options = PluginMessagePublishOptions(replyToMessageId = replyTo.ifEmpty { null }))
+        pluginContext.messagePublisher.sendText(target, text, options = PluginMessagePublishOptions(replyToMessageId = replyTo.ifEmpty { null })).requireAccepted()
     }
 
     private suspend fun sendImage(target: TargetAddress, image: Image, filename: String) {
-        val data = image.encodeToData() ?: return
-        val file = cacheUtils.cacheFile(CacheType.DRAW, filename)
-        file.writeBytes(data.bytes)
+        val file = cacheRenderedImage(image, cacheUtils, filename)
         val batches = listOf(MessageBatch(listOf(MessageContent.Image(fallbackText = "", image = MediaRef(uri = file.absolutePath, kind = MediaKind.IMAGE, mimeType = "image/png")))))
-        pluginContext.messagePublisher.sendBatches(target, batches)
+        pluginContext.messagePublisher.sendBatches(target, batches).requireAccepted()
     }
 }
