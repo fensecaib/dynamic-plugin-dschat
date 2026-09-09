@@ -1,6 +1,8 @@
 package top.colter.dynamic.agent.ds
 
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runInterruptible
 import top.colter.dynamic.agent.util.HttpUtils
 import java.net.http.HttpClient
 import kotlin.coroutines.cancellation.CancellationException
@@ -22,13 +24,13 @@ class DeepSeekClient(private val apiKey: String, private val apiUrl: String) {
                 delay((attempt * 2L).seconds)
             }
             try {
-                val response = HttpUtils.httpPost(
+                val response = runInterruptible(Dispatchers.IO) { HttpUtils.httpPost(
                     url = apiUrl,
                     body = requestBody,
                     headers = mapOf("Authorization" to "Bearer $apiKey"),
                     timeoutSec = 120,
                     client = client
-                )
+                ) }
 
                 if (response.statusCode() in 200..299) {
                     val chatResponse = HttpUtils.json.decodeFromString(

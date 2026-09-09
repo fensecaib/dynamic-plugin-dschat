@@ -1,6 +1,8 @@
 package top.colter.dynamic.agent.util
 
 import kotlinx.serialization.json.Json
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runInterruptible
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -9,6 +11,13 @@ import java.net.http.HttpResponse
 import java.time.Duration
 
 object HttpUtils {
+    /** 阻塞式 HttpClient.send 在 IO 线程执行，并在协程取消时中断请求。 */
+    suspend fun httpGetAsync(url: String, headers: Map<String, String> = emptyMap(), params: Map<String, String> = emptyMap()): HttpResponse<String> =
+        runInterruptible(Dispatchers.IO) { httpGet(url, headers, params) }
+
+    suspend fun httpGetBytesAsync(url: String): HttpResponse<ByteArray> =
+        runInterruptible(Dispatchers.IO) { httpGetBytes(url) }
+
     val json: Json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true

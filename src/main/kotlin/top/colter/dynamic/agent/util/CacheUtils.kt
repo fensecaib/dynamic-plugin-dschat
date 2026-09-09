@@ -1,6 +1,10 @@
 package top.colter.dynamic.agent.util
 
 import org.jetbrains.skia.Image
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.nio.file.Path
 
@@ -17,6 +21,9 @@ enum class CacheType(val dir: String) {
 }
 
 class CacheUtils(private val baseDir: Path) {
+    private val resourceBytes = BoundedByteCache()
+    // 固定锁条带避免每个 URL 永久保留一把锁；同文件的并发下载与磁盘写入合并。
+    private val resourceLocks = Array(64) { Mutex() }
 
     fun cacheDir(type: CacheType): File {
         val dir = baseDir.resolve("cache").resolve(type.dir).toFile()
@@ -48,13 +55,16 @@ class CacheUtils(private val baseDir: Path) {
         val rawName = url.substringAfterLast("/").substringBefore("?")
         val filename = rawName.replace(Regex("""[<>:"/\\|?*]"""), "_")
         if (filename.isBlank()) return null
-        val cached = findCachedFile(type, filename)
-        if (cached != null) return cached.readBytes()
-
-        val bytes = httpGetBytes(url) ?: return null
-        val file = cacheFile(type, filename)
-        file.writeBytes(bytes)
-        return bytes
+        val key = "${type.dir}/$filename"
+        resourceBytes.get(key)?.let { return it }
+        return resourceLocks[(key.hashCode() and Int.MAX_VALUE) % resourceLocks.size].withLock {
+            resourceBytes.get(key)?.let { return@withLock it }
+            val cached = withContext(Dispatchers.IO) { findCachedFile(type, filename)?.readBytes() }
+            val bytes = cached ?: httpGetBytes(url)?.takeIf { it.isNotEmpty() } ?: return@withLock null
+            if (cached == null) withContext(Dispatchers.IO) { cacheFile(type, filename).writeBytes(bytes) }
+            resourceBytes.put(key, bytes)
+            bytes
+        }
     }
 
     suspend fun getOrDownloadImage(

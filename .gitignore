@@ -47,3 +47,6 @@ bin/
 # Local capture/debug artifacts
 *.har
 debug/
+
+# Local analysis, test credentials and generated review artifacts
+.codex/

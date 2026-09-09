@@ -1,8 +1,11 @@
 package top.colter.dynamic.agent.dota2
 
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.*
 import org.jetbrains.skia.Image
@@ -20,6 +23,8 @@ class Dota2Service(
     private val dataDir: File,
     private val cache: CacheUtils,
 ) {
+    internal val reportTasks = Dota2ReportTaskGate()
+
     private fun Exception.rethrowIfCancellation() {
         if (this is CancellationException) throw this
     }
@@ -90,6 +95,7 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
     private val heroIconPaths = mutableMapOf<Int, String>()
     private val itemIconPaths = mutableMapOf<Int, String>()
     private val constantsMutex = Mutex()
+    private val reportAssetPermits = Semaphore(6)
     @Volatile
     private var heroConstantsLoaded = false
     @Volatile
@@ -128,7 +134,7 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
 
     suspend fun validatePlayer(accountId: Long): String? {
         return try {
-            val resp = HttpUtils.httpGet("$API_BASE/players/$accountId")
+            val resp = HttpUtils.httpGetAsync("$API_BASE/players/$accountId")
             if (resp.statusCode() !in 200..299) return null
             val data = HttpUtils.json.decodeFromString(JsonObject.serializer(), resp.body())
             data["profile"]?.jsonObject?.get("personaname")?.jsonPrimitive?.content
@@ -140,10 +146,10 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
 
     suspend fun getRecentMatches(accountId: Long, limit: Int = 1): JsonArray? {
         return try {
-            val resp = HttpUtils.httpGet("$API_BASE/players/$accountId/recentMatches",
+            val resp = HttpUtils.httpGetAsync("$API_BASE/players/$accountId/recentMatches",
                 params = mapOf("limit" to limit.toString()))
             if (resp.statusCode() !in 200..299) return null
-            HttpUtils.json.decodeFromString(JsonArray.serializer(), resp.body())
+            orderedRecentMatches(HttpUtils.json.decodeFromString(JsonArray.serializer(), resp.body()), limit)
         } catch (e: Exception) {
             e.rethrowIfCancellation()
             null
@@ -152,7 +158,7 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
 
     suspend fun getMatchDetail(matchId: Long): JsonObject? {
         return try {
-            val resp = HttpUtils.httpGet("$API_BASE/matches/$matchId")
+            val resp = HttpUtils.httpGetAsync("$API_BASE/matches/$matchId")
             if (resp.statusCode() !in 200..299) return null
             HttpUtils.json.decodeFromString(JsonObject.serializer(), resp.body())
         } catch (e: Exception) {
@@ -172,7 +178,7 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
         constantsMutex.withLock {
             if (!heroConstantsLoaded) {
                 try {
-                    val heroResp = HttpUtils.httpGet("$API_BASE/constants/heroes")
+                    val heroResp = HttpUtils.httpGetAsync("$API_BASE/constants/heroes")
                     if (heroResp.statusCode() in 200..299) {
                         val heroObj = HttpUtils.json.decodeFromString(JsonObject.serializer(), heroResp.body())
                         if (heroObj.isNotEmpty()) {
@@ -194,7 +200,7 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
 
             if (!itemConstantsLoaded) {
                 try {
-                    val itemResp = HttpUtils.httpGet("$API_BASE/constants/items")
+                    val itemResp = HttpUtils.httpGetAsync("$API_BASE/constants/items")
                     if (itemResp.statusCode() in 200..299) {
                         val itemObj = HttpUtils.json.decodeFromString(JsonObject.serializer(), itemResp.body())
                         if (itemObj.isNotEmpty()) {
@@ -237,7 +243,7 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
 
     private suspend fun downloadBytes(url: String): ByteArray? {
         return try {
-            val resp = HttpUtils.httpGetBytes(url)
+            val resp = HttpUtils.httpGetBytesAsync(url)
             if (resp.statusCode() in 200..299 && resp.body().size > 512) resp.body() else null
         } catch (e: Exception) {
             e.rethrowIfCancellation()
@@ -291,21 +297,21 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
 
     suspend fun getPlayerOverview(accountId: Long): PlayerOverview? {
         try {
-            val plResp = HttpUtils.httpGet("$API_BASE/players/$accountId")
+            val plResp = HttpUtils.httpGetAsync("$API_BASE/players/$accountId")
             if (plResp.statusCode() !in 200..299) return null
             val pl = HttpUtils.json.decodeFromString(JsonObject.serializer(), plResp.body())
 
-            val wlResp = HttpUtils.httpGet("$API_BASE/players/$accountId/wl")
+            val wlResp = HttpUtils.httpGetAsync("$API_BASE/players/$accountId/wl")
             val wl = if (wlResp.statusCode() in 200..299) {
                 HttpUtils.json.decodeFromString(JsonObject.serializer(), wlResp.body())
             } else {
                 return null
             }
 
-            val totsResp = HttpUtils.httpGet("$API_BASE/players/$accountId/totals")
+            val totsResp = HttpUtils.httpGetAsync("$API_BASE/players/$accountId/totals")
             val tots = if (totsResp.statusCode() in 200..299) HttpUtils.json.decodeFromString(JsonArray.serializer(), totsResp.body()) else JsonArray(emptyList())
 
-            val cntsResp = HttpUtils.httpGet("$API_BASE/players/$accountId/counts")
+            val cntsResp = HttpUtils.httpGetAsync("$API_BASE/players/$accountId/counts")
             val cnts = if (cntsResp.statusCode() in 200..299) HttpUtils.json.decodeFromString(JsonObject.serializer(), cntsResp.body()) else JsonObject(emptyMap())
 
             val ms = getRecentMatches(accountId, 10) ?: JsonArray(emptyList())
@@ -449,7 +455,7 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
 
     suspend fun analyzeMatch(
         myAccountId: Long, matchJson: JsonObject,
-        dsClient: DeepSeekClient, model: String
+        dsClient: DeepSeekClient, model: String, mode: Dota2ReportMode = Dota2ReportMode.NORMAL
     ): DsAnalysisResult? {
         ensureConstants()
         val players = matchJson["players"]?.jsonArray ?: return null
@@ -498,7 +504,7 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
             ChatMessage("user", "分析我方队伍的比赛数据，找出MVP(如果赢了)/SVP(如果输了)和战犯：\n\n$sb")
         )
         val request = ChatRequest(model = model, messages = messages,
-            thinking = ThinkingConfig(type = "enabled"), maxTokens = 16384)
+            thinking = ThinkingConfig(type = mode.thinkingType), maxTokens = 16384)
 
         return dsClient.chat(request).fold(
             onSuccess = { response ->
@@ -646,15 +652,75 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
 
     // ── Build reports ─────────────────────────────
 
-    suspend fun buildReport(
+    /** 两种模式共用提示词和绘图；资源与分析并行准备，同一资源每份报告只下载/解码一次。 */
+    internal suspend fun generateMatchReport(
+        matchJson: JsonObject, myAccountId: Long, dsClient: DeepSeekClient, model: String, won: Boolean,
+        mode: Dota2ReportMode = Dota2ReportMode.NORMAL,
+    ): GeneratedDota2Report {
+        val matchId = matchJson["match_id"]?.jsonPrimitive?.longOrNull ?: 0
+        var resources: Dota2ReportAssets? = null
+        var transferred = false
+        try {
+            return measureDotaStage(matchId, "analysis_and_resources", mode) {
+                // 常量先准备好，保证原来的英雄名称及模型输入不因资源并发而发生变化。
+                measureDotaStage(matchId, "constants", mode) { ensureConstants() }
+                coroutineScope {
+                    val pendingAssets = async {
+                        measureDotaStage(matchId, "assets", mode) { prepareReportAssets(matchJson) }.also { resources = it }
+                    }
+                    val analysis = measureDotaStage(matchId, "ai", mode) { analyzeMatch(myAccountId, matchJson, dsClient, model, mode) }
+                    val assets = pendingAssets.await()
+                    val report = measureDotaStage(matchId, "assemble", mode) { buildReport(matchJson, myAccountId, analysis, won, assets) }
+                    GeneratedDota2Report(analysis, report, assets)
+                }
+            }.also { transferred = true }
+        } finally {
+            if (!transferred) resources?.close()
+        }
+    }
+
+    private suspend fun prepareReportAssets(matchJson: JsonObject): Dota2ReportAssets {
+        val players = matchJson["players"]?.jsonArray.orEmpty().map { it.jsonObject }
+        val keys = buildList {
+            players.forEach { p ->
+                add(true to (p["hero_id"]?.jsonPrimitive?.intOrNull ?: 0))
+                ((0..5).map { "item_$it" } + (0..2).map { "backpack_$it" } + "item_neutral").forEach { field ->
+                    add(false to (p[field]?.jsonPrimitive?.intOrNull ?: 0))
+                }
+            }
+        }.filter { it.second > 0 }.distinct()
+        val allocated = java.util.concurrent.ConcurrentLinkedQueue<Image>()
+        var completed = false
+        try {
+            return coroutineScope {
+                val aghs = async { ensureAghsIcons() }
+                val loaded = keys.map { key -> async {
+                    reportAssetPermits.withPermit {
+                        val image = try {
+                            if (key.first) loadHeroIcon(key.second) else loadItemIcon(key.second)
+                        } catch (e: Exception) { e.rethrowIfCancellation(); null }
+                        if (image != null) allocated.add(image)
+                        key to image
+                    }
+                } }.awaitAll()
+                aghs.await()
+                Dota2ReportAssets(
+                    loaded.filter { it.first.first }.associate { it.first.second to it.second },
+                    loaded.filter { !it.first.first }.associate { it.first.second to it.second },
+                )
+            }.also { completed = true }
+        } finally { if (!completed) allocated.forEach { it.close() } }
+    }
+
+    internal suspend fun buildReport(
         matchJson: JsonObject, myAccountId: Long,
-        dsResult: DsAnalysisResult?, won: Boolean
+        dsResult: DsAnalysisResult?, won: Boolean, assets: Dota2ReportAssets? = null,
     ): Dota2MatchReport {
-        ensureConstants(); ensureAghsIcons()
+        if (assets == null) { ensureConstants(); ensureAghsIcons() }
         val players = matchJson["players"]?.jsonArray ?: JsonArray(emptyList())
         val radiantWin = matchJson["radiant_win"]?.jsonPrimitive?.boolean ?: false
 
-        val cards = players.map { p -> buildPlayerCard(p.jsonObject, won, dsResult) }
+        val cards = players.map { p -> buildPlayerCard(p.jsonObject, won, dsResult, assets) }
         val mvpOrSvpCard = cards.find { if (won) it.isMvp else it.isSvp }
             ?: findAnalysisCard(cards, dsResult?.mvpOrSvp)
         val criminalCard = cards.find { it.isCriminal }
@@ -713,17 +779,18 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
     }
 
     private suspend fun buildPlayerCard(
-        obj: JsonObject, won: Boolean, dsResult: DsAnalysisResult?
+        obj: JsonObject, won: Boolean, dsResult: DsAnalysisResult?, assets: Dota2ReportAssets? = null,
     ): Dota2PlayerCard {
         val heroId = obj["hero_id"]?.jsonPrimitive?.intOrNull ?: 0
         val itemIds = (0..5).map { obj["item_$it"]?.jsonPrimitive?.intOrNull ?: 0 }
         val bpIds = (0..2).map { obj["backpack_$it"]?.jsonPrimitive?.intOrNull ?: 0 }
         val neutralIds = listOf(obj["item_neutral"]?.jsonPrimitive?.intOrNull ?: 0)
         val isRadiant = obj["isRadiant"]?.jsonPrimitive?.boolean ?: true
+        suspend fun item(id: Int): Image? = if (assets == null) loadItemIcon(id) else assets.items[id]
 
         return Dota2PlayerCard(
             name = playerDisplayName(obj),
-            heroName = heroName(heroId), heroId = heroId, heroIcon = loadHeroIcon(heroId),
+            heroName = heroName(heroId), heroId = heroId, heroIcon = if (assets == null) loadHeroIcon(heroId) else assets.heroes[heroId],
             isRadiant = isRadiant,
             kills = obj["kills"]?.jsonPrimitive?.intOrNull ?: 0,
             deaths = obj["deaths"]?.jsonPrimitive?.intOrNull ?: 0,
@@ -735,11 +802,12 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
             towerDamage = obj["tower_damage"]?.jsonPrimitive?.intOrNull ?: 0,
             level = obj["level"]?.jsonPrimitive?.intOrNull ?: 0,
             lastHits = obj["last_hits"]?.jsonPrimitive?.intOrNull ?: 0,
-            items = itemIds.map { loadItemIcon(it) } + neutralIds.mapNotNull { loadItemIcon(it) },
+            items = itemIds.map { item(it) } + neutralIds.mapNotNull { item(it) },
             denies = obj["denies"]?.jsonPrimitive?.intOrNull ?: 0,
             netWorth = obj["net_worth"]?.jsonPrimitive?.intOrNull ?: 0,
             heroHealing = obj["hero_healing"]?.jsonPrimitive?.intOrNull ?: 0,
-            backpackItems = bpIds.mapNotNull { loadItemIcon(it) },
+            // 背包必须保留三个固定槽位，避免中间空槽导致后续物品向前错位。
+            backpackItems = bpIds.map { item(it) },
             hasAghsScepter = (obj["aghanims_scepter"]?.jsonPrimitive?.intOrNull ?: 0) > 0,
             hasAghsShard = (obj["aghanims_shard"]?.jsonPrimitive?.intOrNull ?: 0) > 0,
             aghsScepterIcon = getAghsIcon((obj["aghanims_scepter"]?.jsonPrimitive?.intOrNull ?: 0) > 0, false),
