@@ -1,316 +1,222 @@
 package top.colter.dynamic.agent.draw
 
-import kotlinx.serialization.json.*
-import org.jetbrains.skia.Color
-import org.jetbrains.skia.Image
-import org.jetbrains.skia.paragraph.TextStyle
+import org.jetbrains.skia.*
+import org.jetbrains.skia.paragraph.*
 import top.colter.dynamic.agent.config.ImageConfig
-import top.colter.dynamic.agent.dota2.Dota2Service
-import top.colter.dynamic.agent.dota2.PlayerOverview
-import top.colter.skiko.*
-import top.colter.skiko.data.LayoutAlignment
-import top.colter.skiko.data.RichParagraphBuilder
-import top.colter.skiko.layout.*
+import top.colter.dynamic.agent.dota2.*
+import top.colter.skiko.FontRegistry
+import top.colter.skiko.Fonts
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+import kotlin.math.*
 
-typealias WorstDetail = Pair<JsonObject, JsonObject>
+private val O_BG = Color.makeRGB(11,17,28)
+private val O_CARD = Color.makeRGB(19,30,45)
+private val O_ACCENT = Color.makeRGB(83,221,208)
+private val O_BODY = Color.makeRGB(237,243,252)
+private val O_DIM = Color.makeRGB(154,174,197)
+private val O_EDGE = Color.makeRGB(40,56,75)
+private val O_GOLD = Color.makeRGB(233,193,123)
+private val O_RED = Color.makeRGB(241,142,156)
 
-suspend fun dota2OverviewDraw(
-    accountId: Long,
-    dota2Service: Dota2Service,
-    analysisText: String? = null,
-    worstDetails: List<WorstDetail> = emptyList(),
-    config: ImageConfig,
-    fontRegistry: FontRegistry = Fonts.default
-): Image? {
-    Dp.factor = config.factor
-    val ov = dota2Service.getPlayerOverview(accountId) ?: return null
-    dota2Service.ensureConstants()
-    val heroIcons = mutableMapOf<Int, Image?>()
-    val itemIcons = mutableMapOf<Int, Image?>()
-    ov.recentMatches.forEach { m ->
-        val hid = m.jsonObject["hero_id"]?.jsonPrimitive?.intOrNull ?: 0
-        if (hid !in heroIcons) heroIcons[hid] = dota2Service.loadHeroIcon(hid)
-    }
-    worstDetails.forEach { (sm, dt) ->
-        val players = dt["players"]?.jsonArray ?: return@forEach
-        val me = players.find {
-            it.jsonObject["account_id"]?.jsonPrimitive?.longOrNull == accountId
-        }?.jsonObject ?: return@forEach
-        for (i in 0..5) {
-            val iid = me["item_$i"]?.jsonPrimitive?.intOrNull ?: 0
-            if (iid > 0 && iid !in itemIcons) itemIcons[iid] = dota2Service.loadItemIcon(iid)
-        }
-        val nid = me["item_neutral"]?.jsonPrimitive?.intOrNull ?: 0
-        if (nid > 0 && nid !in itemIcons) itemIcons[nid] = dota2Service.loadItemIcon(nid)
-        for (i in 0..2) {
-            val bid = me["backpack_$i"]?.jsonPrimitive?.intOrNull ?: 0
-            if (bid > 0 && bid !in itemIcons) itemIcons[bid] = dota2Service.loadItemIcon(bid)
-        }
-    }
-
-    return View(Modifier().width(1060.dp).background(C_BG), fontRegistry = fontRegistry) {
-        Column(Modifier().fillMaxWidth()) {
-            overviewMatchTable(ov, heroIcons, dota2Service, fontRegistry)
-            if (analysisText != null) {
-                sep()
-                analysisSection(analysisText, worstDetails, heroIcons, itemIcons, accountId, dota2Service, fontRegistry)
-            }
-            sep()
-            overviewFoot(fontRegistry)
-        }
-    }
-}
-
-fun Layout.overviewMatchTable(ov: PlayerOverview, icons: Map<Int, Image?>, ds: Dota2Service, fr: FontRegistry = Fonts.default) {
-    val ff = fr.textTypeface?.familyName ?: ""
-    Row(Modifier().fillMaxWidth().height(28.dp).background(C_HDR), alignment = LayoutAlignment.LEFT) {
-        Text(text = "  ${ov.playerName}  胜 ${ov.totalWins} / 负 ${ov.totalLosses}  胜率 ${fmtOvrPct(ov.winRate)}  近${ov.recentMatches.size}场 ${ov.recentWins}胜${ov.recentLosses}负", color = C_BLUE, fontSize = 14.dp, fontFamily = ff)
-    }
-    Row(Modifier().fillMaxWidth().height(24.dp).background(C_ODD), alignment = LayoutAlignment.LEFT) {
-        hdr("", 22.dp, fr); hdr("英雄", 76.dp, fr); hdr("结果", 42.dp, fr)
-        hdr("K/D/A", 68.dp, fr); hdr("KDA", 42.dp, fr)
-        hdr("GPM", 40.dp, fr); hdr("XPM", 40.dp, fr); hdr("伤害", 58.dp, fr)
-        hdr("时长", 52.dp, fr); hdr("日期", 62.dp, fr); hdr("分路", 40.dp, fr); hdr("段位", 72.dp, fr)
-        hdr("比赛ID", 86.dp, fr)
-    }
-    ov.recentMatches.forEachIndexed { i, m ->
-        ovrMatchRow(i + 1, m.jsonObject, icons, ds, fr)
-        sep()
-    }
-}
-
-fun Layout.ovrMatchRow(idx: Int, obj: JsonObject, icons: Map<Int, Image?>, ds: Dota2Service, fr: FontRegistry = Fonts.default) {
-    val ff = fr.textTypeface?.familyName ?: ""
-    val slot = obj["player_slot"]?.jsonPrimitive?.intOrNull ?: 0
-    val rw = obj["radiant_win"]?.jsonPrimitive?.boolean ?: false
-    val won = (slot < 128) == rw
-    val bg = if (won) C_GREEN.withAlpha(0.06f) else C_RED.withAlpha(0.06f)
-    val hid = obj["hero_id"]?.jsonPrimitive?.intOrNull ?: 0
-    val hn = ds.heroName(hid)
-    val k = obj["kills"]?.jsonPrimitive?.intOrNull ?: 0
-    val d = kotlin.math.max(1, obj["deaths"]?.jsonPrimitive?.intOrNull ?: 1)
-    val a = obj["assists"]?.jsonPrimitive?.intOrNull ?: 0
-    val kd = (k + a).toDouble() / d
-
-    Row(Modifier().fillMaxWidth().height(34.dp).background(bg), alignment = LayoutAlignment.LEFT) {
-        Box(Modifier().width(22.dp).height(34.dp), alignment = LayoutAlignment.CENTER) {
-            Text(text = "$idx", color = C_DIM, fontSize = 12.dp, fontFamily = ff, alignment = LayoutAlignment.CENTER)
-        }
-        Box(Modifier().width(38.dp).height(34.dp), alignment = LayoutAlignment.CENTER) {
-            val icon = icons[hid]
-            if (icon != null) Image(image = icon, modifier = Modifier().width(32.dp).height(20.dp))
-            else Box(Modifier().width(32.dp).height(20.dp).background(C_ODD).border(1.dp, 3.dp, C_BORDER), alignment = LayoutAlignment.CENTER) {
-                Text(text = hn.take(2), color = C_DIM, fontSize = 10.dp, fontFamily = ff, alignment = LayoutAlignment.CENTER)
-            }
-        }
-        Box(Modifier().width(38.dp).height(34.dp), alignment = LayoutAlignment.LEFT) {
-            Text(text = hn.take(5), color = C_TXT2, fontSize = 12.dp, fontFamily = ff)
-        }
-        Box(Modifier().width(42.dp).height(34.dp), alignment = LayoutAlignment.CENTER) {
-            Text(text = if (won) "胜" else "败", color = if (won) C_GREEN else C_RED, fontSize = 12.dp, fontFamily = ff, alignment = LayoutAlignment.CENTER)
-        }
-        Box(Modifier().width(68.dp).height(34.dp), alignment = LayoutAlignment.CENTER) {
-            Text(text = "$k/$d/$a", color = C_TXT, fontSize = 12.dp, fontFamily = ff, alignment = LayoutAlignment.CENTER)
-        }
-        Box(Modifier().width(42.dp).height(34.dp), alignment = LayoutAlignment.CENTER) {
-            Text(text = fmtOvrKda(kd), color = kdaC(kd), fontSize = 12.dp, fontFamily = ff, alignment = LayoutAlignment.CENTER)
-        }
-        Box(Modifier().width(40.dp).height(34.dp), alignment = LayoutAlignment.CENTER) {
-            Text(text = obj["gold_per_min"]?.jsonPrimitive?.intOrNull?.toString() ?: "0", color = C_GOLD, fontSize = 12.dp, fontFamily = ff, alignment = LayoutAlignment.CENTER)
-        }
-        Box(Modifier().width(40.dp).height(34.dp), alignment = LayoutAlignment.CENTER) {
-            Text(text = obj["xp_per_min"]?.jsonPrimitive?.intOrNull?.toString() ?: "0", color = C_TXT2, fontSize = 12.dp, fontFamily = ff, alignment = LayoutAlignment.CENTER)
-        }
-        Box(Modifier().width(58.dp).height(34.dp), alignment = LayoutAlignment.CENTER) {
-            Text(text = fmtK(obj["hero_damage"]?.jsonPrimitive?.intOrNull ?: 0), color = C_TXT, fontSize = 12.dp, fontFamily = ff, alignment = LayoutAlignment.CENTER)
-        }
-        Box(Modifier().width(52.dp).height(34.dp), alignment = LayoutAlignment.CENTER) {
-            Text(text = ovrDur(obj["duration"]?.jsonPrimitive?.intOrNull ?: 0), color = C_TXT2, fontSize = 12.dp, fontFamily = ff, alignment = LayoutAlignment.CENTER)
-        }
-        Box(Modifier().width(62.dp).height(34.dp), alignment = LayoutAlignment.CENTER) {
-            Text(text = ovrTs(obj["start_time"]?.jsonPrimitive?.longOrNull ?: 0).take(11), color = C_DIM, fontSize = 11.dp, fontFamily = ff, alignment = LayoutAlignment.CENTER)
-        }
-        val ln = obj["lane_role"]?.jsonPrimitive?.intOrNull ?: -1
-        Box(Modifier().width(40.dp).height(34.dp), alignment = LayoutAlignment.CENTER) {
-            Text(text = when (ln) { 1 -> "优势"; 2 -> "中路"; 3 -> "劣势"; else -> "-" }, color = C_BLUE, fontSize = 11.dp, fontFamily = ff, alignment = LayoutAlignment.CENTER)
-        }
-        Box(Modifier().width(72.dp).height(34.dp), alignment = LayoutAlignment.CENTER) {
-            Text(text = ds.rankName(obj["average_rank"]?.jsonPrimitive?.intOrNull ?: 0), color = C_GOLD, fontSize = 11.dp, fontFamily = ff, alignment = LayoutAlignment.CENTER)
-        }
-        Box(Modifier().width(86.dp).height(34.dp), alignment = LayoutAlignment.CENTER) {
-            Text(text = obj["match_id"]?.jsonPrimitive?.content ?: "?", color = C_DIM, fontSize = 11.dp, fontFamily = ff, alignment = LayoutAlignment.CENTER)
-        }
-    }
-}
-
-fun Layout.heroMatchCard(obj: JsonObject, icons: Map<Int, Image?>, itemIcons: Map<Int, Image?>, detail: JsonObject, accountId: Long, ds: Dota2Service, fr: FontRegistry = Fonts.default) {
-    val ff = fr.textTypeface?.familyName ?: ""
-    val hid = obj["hero_id"]?.jsonPrimitive?.intOrNull ?: 0
-    val hn = ds.heroName(hid)
-    val k = obj["kills"]?.jsonPrimitive?.intOrNull ?: 0
-    val d = kotlin.math.max(1, obj["deaths"]?.jsonPrimitive?.intOrNull ?: 1)
-    val a = obj["assists"]?.jsonPrimitive?.intOrNull ?: 0
-    val gpm = obj["gold_per_min"]?.jsonPrimitive?.intOrNull ?: 0
-    val xpm = obj["xp_per_min"]?.jsonPrimitive?.intOrNull ?: 0
-    val dmg = obj["hero_damage"]?.jsonPrimitive?.intOrNull ?: 0
-    val lh = obj["last_hits"]?.jsonPrimitive?.intOrNull ?: 0
-    val s = obj["player_slot"]?.jsonPrimitive?.intOrNull ?: 0
-    val rw = obj["radiant_win"]?.jsonPrimitive?.boolean ?: false
-    val won = (s < 128) == rw
-    val cb = Color.makeRGB(15, 23, 42)
-    val cbo = Color.makeRGB(255, 255, 255).withAlpha(0.08f)
-
-    val players = detail["players"]?.jsonArray ?: JsonArray(emptyList())
-    val me = players.find { it.jsonObject["account_id"]?.jsonPrimitive?.longOrNull == accountId }?.jsonObject
-    val mainItems = (0..5).map { me?.get("item_$it")?.jsonPrimitive?.intOrNull ?: 0 }
-    val neutralId = me?.get("item_neutral")?.jsonPrimitive?.intOrNull ?: 0
-
-    Column(Modifier().width(255.dp).height(240.dp).background(cb).border(1.dp, 16.dp, cbo)) {
-        Row(Modifier().width(223.dp).height(52.dp).margin(16.dp, 8.dp, 16.dp, 0.dp), alignment = LayoutAlignment.LEFT) {
-            Box(Modifier().width(40.dp).height(40.dp).margin(0.dp, 0.dp, 8.dp, 0.dp), alignment = LayoutAlignment.CENTER) {
-                val icon = icons[hid]
-                if (icon != null) Image(image = icon, modifier = Modifier().width(40.dp).height(26.dp))
-                else Box(Modifier().width(40.dp).height(26.dp).background(C_ODD).border(1.dp, 4.dp, C_BORDER), alignment = LayoutAlignment.CENTER) {
-                    Text(text = hn.take(2), color = C_DIM, fontSize = 12.dp, fontFamily = ff, alignment = LayoutAlignment.CENTER)
+/** Measure first, then paint. No shared Dp state and no network or data reads during drawing. */
+private class OverviewCanvas(private val fr: FontRegistry) : AutoCloseable {
+    private val paragraphs = mutableListOf<Paragraph>()
+    val operations = mutableListOf<(Canvas) -> Unit>()
+    fun text(value: String, x: Float, y: Float, width: Float, size: Float = 20f, color: Int = O_BODY, bold: Boolean = false): Float {
+        val paragraph = ParagraphStyle().use { ps ->
+            ParagraphBuilder(ps, fr.fonts).use { builder ->
+                TextStyle().use { requested ->
+                    requested.setFontFamily(ff(fr)).setFontSize(size).setColor(color).setFontStyle(if (bold) FontStyle.BOLD else FontStyle.NORMAL)
+                    requested.setHeight(if (bold) 1.25f else 1.5f)
+                    fr.resolveTextStyle(requested).use { style -> builder.pushStyle(style).addText(value); builder.popStyle() }
                 }
-            }
-            Column(Modifier().width(175.dp).height(52.dp), alignment = LayoutAlignment.LEFT) {
-                Text(text = hn, color = C_TXT, fontSize = 14.dp, fontFamily = ff)
-                Text(text = "$k/$d/$a", color = C_TXT2, fontSize = 15.dp, fontFamily = ff)
-                Text(text = if (won) "WIN" else "LOSS", color = if (won) C_GREEN else C_RED, fontSize = 11.dp, fontFamily = ff)
+                builder.build()
             }
         }
-        Row(Modifier().width(223.dp).height(28.dp).margin(2.dp, 6.dp, 2.dp, 0.dp), alignment = LayoutAlignment.LEFT) {
-            mainItems.take(6).forEach { iid -> itemSlot(itemIcons[iid], 24.dp, fr = fr) }
-            itemSlot(itemIcons[neutralId], 24.dp, neutral = true, fr = fr)
-        }
-        Row(Modifier().width(223.dp).height(28.dp).margin(2.dp, 4.dp, 2.dp, 0.dp), alignment = LayoutAlignment.LEFT) {
-            cardStat("GPM", "$gpm", C_GOLD, 108, fr); Box(Modifier().width(7.dp).height(1.dp)); cardStat("XPM", "$xpm", C_TXT2, 108, fr)
-        }
-        Row(Modifier().width(223.dp).height(28.dp).margin(2.dp, 2.dp, 2.dp, 0.dp), alignment = LayoutAlignment.LEFT) {
-            cardStat("伤害", if (dmg >= 1000) "${dmg/1000}k" else "$dmg", C_TXT, 108, fr); Box(Modifier().width(7.dp).height(1.dp)); cardStat("承伤", "-", C_DIM, 108, fr)
-        }
-        Row(Modifier().width(223.dp).height(28.dp).margin(2.dp, 2.dp, 2.dp, 8.dp), alignment = LayoutAlignment.LEFT) {
-            cardStat("补刀", "$lh", C_TXT, 108, fr); Box(Modifier().width(7.dp).height(1.dp)); cardStat("参战", "$k/$a", C_TXT, 108, fr)
-        }
+        paragraphs += paragraph; paragraph.layout(width)
+        operations += { paragraph.paint(it, x, y) }
+        return paragraph.height
     }
+    fun card(x: Float, y: Float, w: Float, h: Float) {
+        // Insert before texts already measured for this card; background is always painted in a separate pass.
+        backgrounds += { c -> Paint().use {
+            val shape=RRect.makeXYWH(x,y,w,h,22f)
+            it.color = O_CARD; c.drawRRect(shape,it)
+            it.color=O_EDGE;it.mode=PaintMode.STROKE;it.strokeWidth=2f;c.drawRRect(shape,it)
+        } }
+    }
+    private val backgrounds = mutableListOf<(Canvas) -> Unit>()
+    fun line(x: Float, y: Float, x2: Float, y2: Float, color: Int = O_EDGE, stroke: Float = 1f) {
+        operations += { c -> Paint().use { it.color=color; it.strokeWidth=stroke; c.drawLine(x,y,x2,y2,it) } }
+    }
+    fun icon(image: Image?, x: Float, y: Float, w: Float, h: Float) {
+        if (image == null) text("—",x+w/3,y+h/5,w/2,16f,O_DIM)
+        else operations += { c -> c.save();try { c.clipRRect(RRect.makeXYWH(x,y,w,h,9f),true);c.drawImageRect(image,Rect.makeXYWH(x,y,w,h)) } finally { c.restore() } }
+    }
+    fun dot(x:Float,y:Float,color:Int,radius:Float=5f) { operations += { c -> Paint().use { it.color=color;c.drawCircle(x,y,radius,it) } } }
+    fun paint(canvas: Canvas) { backgrounds.forEach { it(canvas) }; operations.forEach { it(canvas) } }
+    override fun close() = paragraphs.forEach { it.close() }
 }
 
-fun Layout.cardStat(label: String, value: String, color: Int, wDp: Int, fr: FontRegistry = Fonts.default) {
-    val ff = fr.textTypeface?.familyName ?: ""
-    Column(Modifier().width(wDp.dp).height(28.dp).background(C_ODD).border(0.dp, 6.dp), alignment = LayoutAlignment.CENTER) {
-        Text(text = label, color = C_DIM, fontSize = 10.dp, fontFamily = ff, alignment = LayoutAlignment.CENTER)
-        Text(text = value, color = color, fontSize = 13.dp, fontFamily = ff, alignment = LayoutAlignment.CENTER)
-    }
-}
+private fun oDate(value: Long?): String = value?.let { DateTimeFormatter.ofPattern("MM/dd HH:mm").withZone(ZoneId.of("Asia/Shanghai")).format(Instant.ofEpochSecond(it)) } ?: "—"
+private fun oNumber(value: Double?) = value?.let { String.format(Locale.ROOT,"%.1f",it) } ?: "—"
 
-fun Layout.analysisSection(
-    text: String, worstDetails: List<WorstDetail>, icons: Map<Int, Image?>,
-    itemIcons: Map<Int, Image?>, accountId: Long, ds: Dota2Service, fr: FontRegistry = Fonts.default
-) {
-    val ff = fr.textTypeface?.familyName ?: ""
-    val sections = text.split(Regex("(?=\\[.*?])")).filter { it.isNotBlank() }
-    val rtbFn = ff
-    var cardIdx = 0
-
-    val normal = mutableListOf<String>()
-    val spotlight = mutableListOf<String>()
-    for (block in sections.take(5)) {
-        val t = block.trim()
-        val te = t.indexOfFirst { it == '\n' }.let { if (it > 0) it else t.length }
-        val title = t.substring(0, te).trim()
-        if ("高光" in title || "剖析" in title) spotlight.add(t)
-        else normal.add(t)
-    }
-
-    for (block in normal) {
-        if ("诊断" !in block && "总结" !in block) renderAnalysisBlock(block, rtbFn, fr)
-    }
-
-    if (spotlight.isNotEmpty() && worstDetails.isNotEmpty()) {
-        val highTitle1 = spotlight.getOrNull(0)?.let { t ->
-            val te = t.indexOfFirst { it == '\n' }.let { if (it > 0) it else t.length }
-            t.substring(0, te).trim()
-        } ?: "[对局高光剖析]"
-        val highBody1 = spotlight.getOrNull(0)?.let { t ->
-            val te = t.indexOfFirst { it == '\n' }.let { if (it > 0) it else t.length }
-            t.substring(te).trim()
-        } ?: ""
-        val highTitle2 = spotlight.getOrNull(1)?.let { t ->
-            val te = t.indexOfFirst { it == '\n' }.let { if (it > 0) it else t.length }
-            t.substring(0, te).trim()
-        } ?: "[对局高光剖析2]"
-        val highBody2 = spotlight.getOrNull(1)?.let { t ->
-            val te = t.indexOfFirst { it == '\n' }.let { if (it > 0) it else t.length }
-            t.substring(te).trim()
-        } ?: ""
-
-        Row(Modifier().fillMaxWidth().height(28.dp).background(C_HDR), alignment = LayoutAlignment.LEFT) {
-            Text(text = "  对局详情", color = C_RED, fontSize = 14.dp, fontFamily = ff)
+internal fun dota2OverviewDraw(report: GeneratedOverview, config: ImageConfig, fontRegistry: FontRegistry = Fonts.default): Image {
+    val s=report.snapshot;val a=report.analysis;val assets=report.assets;val width=1600f
+    fun percent(value:Double?)=value?.let { oNumber(it)+"%" } ?: "—"
+    OverviewCanvas(fontRegistry).use { p -> with(p) {
+        text("DOTA 2  /  PLAYER REPORT",48f,32f,1000f,20f,O_ACCENT,true)
+        card(1270f,30f,282f,38f);text(report.mode.command,1285f,34f,252f,20f,O_ACCENT)
+        icon(assets.avatar,48f,83f,108f,108f)
+        val nameH=text(s.player,184f,76f,1360f,46f,O_BODY,true)
+        val subtitleY=max(142f,76f+nameH+6f)
+        text("近期表现诊断  ·  最近 ${s.matches.size} 场",185f,subtitleY,1320f,27f,O_DIM)
+        val dateY=max(215f,subtitleY+63)
+        val dateH=text("账号 ${s.accountId}   /   ${oDate(s.matches.firstOrNull()?.start)} — ${oDate(s.matches.lastOrNull()?.start)}  北京时间",48f,dateY,1504f,21f,O_DIM)
+        var y=max(267f,dateY+dateH+18)
+        val stats=listOf(
+            Triple("近期战绩","${s.wins} 胜 ${s.losses} 负",if(s.wins+s.losses>0) "胜率 ${s.wins*100/(s.wins+s.losses)}%" else "结果暂无"),
+            Triple("场均 K / D / A","${s.average("kills").display()} / ${s.average("deaths").display()} / ${s.average("assists").display()}","击杀 / 死亡 / 助攻"),
+            Triple("场均 GPM / XPM","${s.average("gold_per_min").display(0)} / ${s.average("xp_per_min").display(0)}","每分钟金钱 / 经验"),
+            Triple("场均击杀参与率",percent(s.average("kill_participation").value),"逐场参与率的算术平均")
+        )
+        stats.forEachIndexed { i,(label,value,note) -> val x=48f+i*381;card(x,y,361f,141f);text(label,x+22,y+15,317f,21f,O_DIM);text(value,x+22,y+51,317f,32f,if(i==0) O_ACCENT else O_BODY,true);text(note,x+22,y+102,317f,19f,O_DIM) }
+        y+=165
+        a.notice?.let { notice -> val h=text(notice,73f,y+14,1454f,23f,O_GOLD);card(48f,y,1504f,h+30);y+=h+54 }
+        val top=y
+        text("01  近期表现总览",76f,y+24,784f,30f,O_BODY,true)
+        text("近期状态与表现侧写",76f,y+76,784f,28f,O_ACCENT,true)
+        val overviewH=text(a.body("overview"),76f,y+125,784f,24f)+155
+        card(48f,y,840f,overviewH)
+        val heroY=y+overviewH+20
+        val groups=s.matches.groupBy { it.heroId }.values.sortedWith(compareByDescending<List<OverviewMatch>> { it.size }.thenBy { it.first().heroId })
+        val heroH=91f+groups.size*57+40
+        card(48f,heroY,840f,heroH)
+        text("英雄样本分布",76f,heroY+20,300f,26f,O_BODY,true)
+        text("场次 / 战绩",400f,heroY+29,220f,20f,O_DIM);text("GPM 均值",635f,heroY+29,220f,20f,O_DIM)
+        groups.forEachIndexed { i,group ->
+            val yy=heroY+76+i*57
+            icon(assets.heroes[group.first().heroId],76f,yy,64f,37f);text(group.first().hero,158f,yy+4,235f,23f)
+            text("${group.size} 场 / ${group.count { it.won==true }} 胜 ${group.count { it.won==false }} 负",400f,yy+4,220f,22f,O_DIM)
+            val values=group.mapNotNull { it.values["gold_per_min"] }
+            text(values.takeIf { it.isNotEmpty() }?.average()?.let { String.format(Locale.ROOT,"%.0f",it) } ?: "—",655f,yy+4,170f,23f,O_ACCENT)
         }
-        sep()
-        Row(Modifier().fillMaxWidth().height(252.dp)) {
-            Column(Modifier().width(525.dp).height(252.dp)) {
-                Box(Modifier().width(525.dp).height(24.dp), alignment = LayoutAlignment.LEFT) {
-                    Text(text = "  $highTitle1", color = C_RED, fontSize = 13.dp, fontFamily = ff)
+        text("小样本记录，不据此判定英雄熟练度。",76f,heroY+heroH-37,780f,20f,O_DIM)
+        card(912f,top,640f,548f);text("同英雄基准雷达",940f,top+24,580f,28f,O_BODY,true)
+        text("近期各场百分位的均值  ·  0—100",940f,top+70,580f,21f,O_DIM)
+        val cx=1232f;val cy=top+296;val radius=141f
+        val angles=(0..4).map { -PI/2+it*2*PI/5 };val bm=overviewMetrics.keys.map { s.average(it,true) }
+        for (scale in listOf(.25f,.5f,.75f,1f)) for(i in angles.indices) {
+            val j=(i+1)%5;line(cx+cos(angles[i]).toFloat()*radius*scale,cy+sin(angles[i]).toFloat()*radius*scale,cx+cos(angles[j]).toFloat()*radius*scale,cy+sin(angles[j]).toFloat()*radius*scale,stroke=2f)
+        }
+        angles.forEach { z -> line(cx,cy,cx+cos(z).toFloat()*radius,cy+sin(z).toFloat()*radius) }
+        if(bm.all { it.value!=null }) operations += { c ->
+            PathBuilder().use { path ->
+                angles.forEachIndexed { i,z ->
+                    val x=cx+cos(z).toFloat()*radius*bm[i].value!!.toFloat()/100
+                    val yy=cy+sin(z).toFloat()*radius*bm[i].value!!.toFloat()/100
+                    if(i==0)path.moveTo(x,yy) else path.lineTo(x,yy)
                 }
-                val s1 = TextStyle().setColor(C_TXT2).setFontSize(12.px).setFontFamily(rtbFn)
-                val r1 = RichParagraphBuilder(s1).apply { addText(highBody1) }
-                RichText(paragraph = r1.build(), modifier = Modifier().width(525.dp).margin(2.dp, 2.dp, 0.dp, 0.dp))
-                Box(Modifier().width(525.dp).height(24.dp).margin(0.dp, 4.dp, 0.dp, 0.dp), alignment = LayoutAlignment.LEFT) {
-                    Text(text = "  $highTitle2", color = C_RED, fontSize = 13.dp, fontFamily = ff)
-                }
-                val s2 = TextStyle().setColor(C_TXT2).setFontSize(12.px).setFontFamily(rtbFn)
-                val r2 = RichParagraphBuilder(s2).apply { addText(highBody2) }
-                RichText(paragraph = r2.build(), modifier = Modifier().width(525.dp).margin(2.dp, 2.dp, 0.dp, 0.dp))
-            }
-            Row(Modifier().width(535.dp).height(252.dp), alignment = LayoutAlignment.LEFT) {
-                if (worstDetails.isNotEmpty()) heroMatchCard(worstDetails[0].first, icons, itemIcons, worstDetails[0].second, accountId, ds, fr)
-                Box(Modifier().width(8.dp).height(1.dp))
-                if (worstDetails.size >= 2) heroMatchCard(worstDetails[1].first, icons, itemIcons, worstDetails[1].second, accountId, ds, fr)
+                path.closePath();path.detach().use { shape -> Paint().use { it.color=Color.makeARGB(40,83,221,208);c.drawPath(shape,it) } }
             }
         }
-    }
-
-    sections.takeLast(1).forEach { renderAnalysisBlock(it, rtbFn, fr) }
+        angles.forEachIndexed { i,z ->
+            val tx=cx+cos(z).toFloat()*(radius+63)-65;val ty=cy+sin(z).toFloat()*(radius+42)-17
+            text("${overviewMetrics.values.toList()[i]} ${bm[i].display()}",tx,ty,145f,21f,O_BODY)
+            val next=(i+1)%5
+            if(bm[i].value!=null) {
+                val px=cx+cos(z).toFloat()*radius*bm[i].value!!.toFloat()/100;val py=cy+sin(z).toFloat()*radius*bm[i].value!!.toFloat()/100
+                dot(px,py,O_ACCENT)
+                if(bm[next].value!=null)line(px,py,cx+cos(angles[next]).toFloat()*radius*bm[next].value!!.toFloat()/100,cy+sin(angles[next]).toFloat()*radius*bm[next].value!!.toFloat()/100,O_ACCENT,4f)
+            }
+        }
+        val coverage=bm.map { it.count }.distinct()
+        text("有效样本 ${if(coverage.size==1) "${coverage.single()}" else "${coverage.min()}—${coverage.max()}"}/${s.matches.size} 场；非操作或意识评分。",940f,top+488,584f,21f,O_DIM)
+        val trend=top+568;card(912f,trend,640f,424f)
+        text("逐场表现趋势",940f,trend+22,584f,28f,O_BODY,true)
+        text("经济 / 输出 / 推进三项百分位均值",940f,trend+69,584f,21f,O_DIM)
+        for(tick in listOf(0,50,100)){val yy=trend+280-tick*1.47f;line(968f,yy,1520f,yy);text("$tick",929f,yy-13,40f,18f,O_DIM)}
+        val step=522f/(s.matches.size-1).coerceAtLeast(1)
+        s.matches.forEachIndexed { i,m ->
+            val x=981f+i*step;val score=m.selectionScore;val previous=s.matches.getOrNull(i-1)?.selectionScore
+            if(score!=null){ val yy=trend+280-score.toFloat()*1.47f;dot(x,yy,when(m.won){true->O_ACCENT;false->O_RED;null->O_DIM},6f)
+                if(previous!=null)line(x-step,trend+280-previous.toFloat()*1.47f,x,yy,O_ACCENT,3f) }
+            icon(assets.heroes[m.heroId],x-23,trend+294,46f,28f);text("${i+1}",x-8,trend+328,40f,18f,when(m.won){true->O_ACCENT;false->O_RED;null->O_DIM})
+        }
+        text("旧 → 新   ·   青：胜 / 红：负   ·   非 IMP",940f,trend+373,584f,20f,O_DIM)
+        y=max(heroY+heroH,top+992)+28
+        text("02  多维度深入分析",48f,y,1504f,30f,O_BODY,true);y+=62
+        overviewDimensions.entries.chunked(2).forEach { entries ->
+            var bottom=y
+            entries.forEachIndexed { j,(id,title) ->
+                val x=48f+j*764; text(title,x+26,y+22,674f,29f,O_ACCENT,true)
+                val metric=when(id){
+                    "economy"->"GPM ${s.average("gold_per_min").display(0)} / XPM ${s.average("xp_per_min").display(0)}"
+                    "output"->"场均英雄伤害 ${s.average("hero_damage").display(0)} / 建筑伤害 ${s.average("tower_damage").display(0)}"
+                    "survival"->"场均死亡 ${s.average("deaths").display()} / 击杀参与率 ${percent(s.average("kill_participation").value)}"
+                    else->"${groups.size} 个英雄 / 最近 ${s.matches.size} 场" }
+                var yy=y+75;yy+=text(metric,x+26,yy,674f,21f,O_GOLD)+20
+                yy+=text(a.body(id),x+26,yy,674f,24f)+30;bottom=max(bottom,yy)
+            }
+            entries.indices.forEach { card(48f+it*764,y,740f,bottom-y) };y=bottom+22
+        }
+        text("03  代表对局 · ${s.representatives.size} 场",48f,y,1504f,30f,O_BODY,true);y+=51
+        y+=text("按经济、输出、推进三项同英雄百分位均值选取最高与最低样本。",48f,y,1504f,23f,O_DIM)+28
+        if(s.representatives.isEmpty()) y+=text("同英雄基准不足，暂不选择代表局；不使用低经济或低伤害替代评分。",48f,y,1504f,24f,O_DIM)+30
+        s.representatives.forEachIndexed { i,rep ->
+            val m=rep.match;val cardTop=y;val accent=if(i==0) O_ACCENT else O_RED
+            icon(assets.heroes[m.heroId],76f,y+25,179f,101f)
+            text("${rep.label}  /  ${m.hero}",277f,y+22,1200f,29f,accent,true)
+            text("${when(m.won){true->"胜利";false->"战败";null->"结果未知"}}   ·   ${m.duration?.let { "%d:%02d".format(Locale.ROOT,it/60,it%60) } ?: "—"}   ·   ${oDate(m.start)}   ·   比赛 ${m.id}",277f,y+70,1200f,21f,O_DIM)
+            line(76f,y+147,1524f,y+147,stroke=2f)
+            text(if(s.representatives.size>1 && i==0) "经济、输出与推进的优势样本" else "值得进一步复盘的样本",76f,y+171,891f,27f,accent,true)
+            val bh=text(a.body("match_${m.id}"),76f,y+218,891f,24f)
+            text("K / D / A   ${m.number("kills")} / ${m.number("deaths")} / ${m.number("assists")}",1028f,y+170,496f,27f,O_BODY,true)
+            text("GPM ${m.number("gold_per_min")}   XPM ${m.number("xp_per_min")}   参战 ${percent(m.values["kill_participation"])}",1028f,y+218,496f,22f,O_DIM)
+            text("样本选择指标  ${oNumber(m.selectionScore)} / 100",1028f,y+258,496f,22f,accent)
+            text("终局六格装备",1028f,y+299,496f,20f,O_DIM)
+            m.items.forEachIndexed { j,id ->icon(assets.items[id],1028f+j*81,y+336,72f,53f) }
+            val bottom=y+max(435f,248f+bh);line(1000f,y+170,1000f,bottom-25,stroke=2f)
+            card(48f,cardTop,1504f,bottom-cardTop);y=bottom+25
+        }
+        text("04  最近 ${s.matches.size} 场 · 样本明细",48f,y,1504f,30f,O_BODY,true)
+        text("与趋势图一致：按时间从旧到新排列",1030f,y+8,510f,21f,O_DIM);y+=61
+        val tableTop=y
+        listOf(76f to "序号 / 英雄",360f to "时间",570f to "结果 / 时长",786f to "K / D / A",1035f to "GPM / XPM",1320f to "参战率").forEach { (x,t)->text(t,x,y+18,210f,21f,O_DIM) }
+        y+=62
+        s.matches.forEachIndexed { i,m ->
+            if(i%2==0){val yy=y;operations += { c->Paint().use { it.color=Color.makeRGB(25,38,56);c.drawRRect(RRect.makeXYWH(62f,yy-3,1476f,55f,6f),it) } } }
+            text("%02d".format(i+1),77f,y+9,50f,21f,O_DIM);icon(assets.heroes[m.heroId],120f,y+7,63f,37f);text(m.hero,198f,y+9,158f,23f)
+            text(oDate(m.start),360f,y+9,205f,22f,O_DIM)
+            text("${when(m.won){true->"胜利";false->"战败";null->"未知"}}  ${m.duration?.let { "%d:%02d".format(Locale.ROOT,it/60,it%60) } ?: "—"}",570f,y+9,210f,22f,when(m.won){true->O_ACCENT;false->O_RED;null->O_DIM})
+            text("${m.number("kills")} / ${m.number("deaths")} / ${m.number("assists")}",786f,y+9,245f,23f)
+            text("${m.number("gold_per_min")} / ${m.number("xp_per_min")}",1035f,y+9,280f,23f)
+            text(percent(m.values["kill_participation"]),1320f,y+9,200f,23f);y+=58
+        }
+        card(48f,tableTop,1504f,y-tableTop+24);y+=57
+        text("05  综合诊断与行动建议",76f,y+22,1450f,30f,O_BODY,true)
+        text("结合数据，对照复盘，再验证改进效果。",76f,y+76,1450f,29f,O_ACCENT,true)
+        // Preserve sentence order and wording, spread the conclusion across three balanced reading columns.
+        val conclusion=a.body("conclusion")
+        val punchline=Regex("\n— [^\n]+$").find(conclusion)?.value.orEmpty()
+        val sentences=Regex("[^。！？!?]+[。！？!?]?").findAll(conclusion.removeSuffix(punchline)).map { it.value.trim() }.toList()
+        val columnCount=sentences.size.coerceIn(1,3)
+        val groupsText=MutableList(columnCount) { "" };val total=sentences.sumOf { it.length };var column=0
+        sentences.forEachIndexed { i,t->if(column<columnCount-1 && groupsText[column].isNotEmpty() && (groupsText[column].length>=total/columnCount || sentences.size-i==columnCount-1-column))column++;groupsText[column]+=t }
+        var end=y+250
+        val columnWidth=1488f/columnCount
+        groupsText.forEachIndexed { i,t ->val x=76f+i*columnWidth;text("0${i+1}  行动建议",x,y+144,columnWidth-50,25f,O_GOLD,true);end=max(end,y+190+text(t,x,y+190,columnWidth-50,24f)+35) }
+        if(punchline.isNotEmpty()) end+=text(punchline.trim(),76f,end,1448f,24f,O_GOLD)+28
+        card(48f,y,1504f,end-y);y=end+29
+        text("数据与阅读说明",48f,y,1504f,23f,O_BODY,true);y+=44
+        y+=text("基础详情 ${s.details}/${s.matches.size} 场；未知胜负 ${s.matches.size-s.wins-s.losses} 场。场均值仅使用有效数据，缺失显示 —。同英雄基准不是同段位，趋势的三项均值不是综合实力评分。",48f,y,1504f,21f,O_DIM)+13
+        y+=text("未使用录像、分路、购买记录或经济时间线。AI 解释仅供复盘参考；相同数据与布局用于普通 / 深度个人详情。",48f,y,1504f,21f,O_DIM)
+        line(48f,y+25,1552f,y+25);text("DYNAMIC BOT   /   个人详情报告",48f,y+45,1000f,20f,O_DIM);text("OpenDota",1380f,y+45,172f,20f,O_DIM);y+=100
+        val requested=config.factor.takeIf { it.isFinite() && it>0 } ?: 1f
+        val scale=min(requested.coerceAtMost(2f),sqrt(16_000_000f/(width*y)))
+        return Surface.makeRasterN32Premul(ceil(width*scale).toInt(),ceil(y*scale).toInt()).use { surface ->surface.canvas.clear(O_BG);surface.canvas.scale(scale,scale);paint(surface.canvas);surface.makeImageSnapshot() }
+    } }
 }
-
-fun Layout.renderAnalysisBlock(block: String, rtbFn: String, fr: FontRegistry = Fonts.default) {
-    val ff = fr.textTypeface?.familyName ?: ""
-    val t = block.trim()
-    val te = t.indexOfFirst { it == '\n' }.let { if (it > 0) it else t.length }
-    val title = t.substring(0, te).trim()
-    val body = t.substring(te).trim()
-    val accent = when {
-        "侧写" in title || "次要" in title -> C_GREEN
-        "高光" in title || "剖析" in title -> C_RED
-        "诊断" in title || "总结" in title -> C_GOLD
-        else -> C_BLUE
-    }
-    Row(Modifier().fillMaxWidth().height(28.dp).background(C_HDR), alignment = LayoutAlignment.LEFT) {
-        Text(text = "  $title", color = accent, fontSize = 14.dp, fontFamily = ff)
-    }
-    sep()
-    val style = TextStyle().setColor(C_TXT2).setFontSize(13.px).setFontFamily(rtbFn)
-    val rpb = RichParagraphBuilder(style).apply { addText(body) }
-    RichText(paragraph = rpb.build(), modifier = Modifier().fillMaxWidth().padding(8.dp, 6.dp, 8.dp, 6.dp))
-}
-
-fun Layout.overviewFoot(fr: FontRegistry = Fonts.default) {
-    val ff = fr.textTypeface?.familyName ?: ""
-    Row(Modifier().fillMaxWidth().height(22.dp).background(C_ODD), alignment = LayoutAlignment.CENTER) {
-        Text(text = "OpenDota API · 仅供参考", color = C_DIM, fontSize = 11.dp, fontFamily = ff, alignment = LayoutAlignment.CENTER)
-    }
-}
-
-private fun fmtOvrPct(v: Double) = String.format("%.1f%%", v * 100)
-private fun fmtOvrKda(k: Double) = String.format("%.1f", k)
-private fun ovrDur(s: Int) = "${s / 60}:${"${s % 60}".padStart(2, '0')}"
-private fun ovrTs(ts: Long): String {
-    if (ts <= 0) return "?"
-    val d = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.CHINA)
-    d.timeZone = java.util.TimeZone.getTimeZone("Asia/Shanghai")
-    return d.format(java.util.Date(ts * 1000))
-}
-private fun kdaC(k: Double): Int = when { k >= 3.0 -> C_GREEN; k >= 1.5 -> C_GOLD; else -> C_RED }
-private fun fmtK(n: Int): String = when { n >= 100000 -> "${n / 1000}k"; n >= 10000 -> String.format("%.1f", n / 1000.0) + "k"; else -> "$n" }

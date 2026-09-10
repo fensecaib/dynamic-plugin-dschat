@@ -14,6 +14,10 @@ data class ChatRequest(
     val tools: List<Tool>? = null,
     @SerialName("tool_choice")
     val toolChoice: String? = null,
+    @SerialName("response_format")
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val responseFormat: Map<String, String>? = null,
 )
 
 @Serializable

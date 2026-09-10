@@ -10,8 +10,12 @@ import top.colter.dynamic.agent.dota2.Dota2ReportMode
 import top.colter.dynamic.agent.dota2.reportBusyMessage
 import top.colter.dynamic.agent.dota2.dotaCommandHelp
 import top.colter.dynamic.agent.dota2.Dota2Service
-import top.colter.dynamic.agent.dota2.PlayerOverview
-import top.colter.dynamic.agent.dota2.resolveDotaReportMatchId
+import top.colter.dynamic.agent.dota2.OverviewMode
+import top.colter.dynamic.agent.dota2.overviewAccount
+import top.colter.dynamic.agent.dota2.generateOverview
+import top.colter.dynamic.agent.dota2.prepareDotaTargetMatch
+import top.colter.dynamic.agent.dota2.resolveDotaReportTarget
+import top.colter.dynamic.agent.dota2.dotaPlayerAccount
 import top.colter.dynamic.agent.dota2.historyCommandHint
 import top.colter.dynamic.agent.dota2.historyTextFallback
 import top.colter.dynamic.agent.dota2.measureDotaStage
@@ -170,31 +174,29 @@ class MessageListener(
                 dota2Service.setBinding(senderId, id)
                 sendText(target, "已绑定: $name (ID=$id)", replyMsgId)
             }
-            parts.size == 1 && parts[0] == "历史" -> {
-                val accountId = dota2Service.getBinding(senderId) ?: kotlin.run { sendText(target, "请先绑定账号", replyMsgId); return }
+            parts.size in 1..2 && parts[0] == "历史" -> {
+                val accountId = try { dotaPlayerAccount(parts.getOrNull(1), dota2Service.getBinding(senderId)) } catch (e: IllegalArgumentException) { sendText(target, e.message ?: "参数无效", replyMsgId); return }
                 val matches = dota2Service.getRecentMatches(accountId, 10)
                 if (matches.isNullOrEmpty()) { sendText(target, "未找到对局记录", replyMsgId); return }
                 val img = dota2HistoryDraw(accountId, matches, imageConfig, fontRegistry, dota2Service)
                 if (img != null) sendImage(target, img, "dota2_history.png")
                 else sendText(target, historyTextFallback(matches), replyMsgId)
-                sendText(target, historyCommandHint(matches.size), replyMsgId)
+                sendText(target, historyCommandHint(matches.size, accountId), replyMsgId)
             }
-            parts.isNotEmpty() && parts[0] == "个人详情" -> {
-                val accountId = if (parts.size >= 2) parts[1].toLongOrNull() else dota2Service.getBinding(senderId)
-                    ?: kotlin.run { sendText(target, "请先绑定账号", replyMsgId); return }
-                val ov = dota2Service.getPlayerOverview(accountId!!) ?: kotlin.run { sendText(target, "获取玩家数据失败", replyMsgId); return }
-                sendText(target, "正在分析中，约需15秒...", replyMsgId)
-                val analysisText = requestOverviewAnalysis(ov)
-                val worstIdx = dota2Service.selectWorstMatches(ov, 2)
-                val worstMatches = worstIdx.mapNotNull { ov.recentMatches.getOrNull(it)?.jsonObject }
-                val worstDetails = worstMatches.mapNotNull { m ->
-                    val mid = m["match_id"]?.jsonPrimitive?.longOrNull ?: return@mapNotNull null
-                    val detail = dota2Service.getMatchDetail(mid)
-                    if (detail != null) m to detail else null
+            parts.isNotEmpty() && OverviewMode.fromCommand(parts[0]) != null -> dota2Service.reportTasks.runIfIdle(onBusy = { sendText(target, reportBusyMessage, replyMsgId) }) {
+                try {
+                    val accountId = overviewAccount(parts, dota2Service.getBinding(senderId))
+                    val mode = requireNotNull(OverviewMode.fromCommand(parts[0]))
+                    sendText(target, "正在生成玩家 #$accountId 的${mode.command}，请稍候。", replyMsgId)
+                    dota2Service.generateOverview(accountId, mode, dsClient, config.api.model).use { generated ->
+                        val image = dota2OverviewDraw(generated, imageConfig, fontRegistry)
+                        sendImage(target, image, "dota2_overview_${accountId}_${mode.name.lowercase()}.png")
+                        generated.analysis.notice?.let { sendText(target, it, replyMsgId) }
+                    }
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    sendText(target, "个人详情生成或发送失败: ${e.message ?: "未知错误"}", replyMsgId)
                 }
-                val img = dota2OverviewDraw(accountId, dota2Service, analysisText, worstDetails, imageConfig, fontRegistry)
-                if (img != null) sendImage(target, img, "dota2_overview.png")
-                else sendText(target, analysisText ?: "分析失败", replyMsgId)
             }
             parts.size == 2 && parts[0] == "分析" -> {
                 val matchId = parts[1].toLongOrNull() ?: return
@@ -213,25 +215,13 @@ class MessageListener(
                     sendText(target, sb.toString(), replyMsgId)
                 }
             }
-            parts.size in 1..2 && Dota2ReportMode.fromCommand(parts[0]) != null -> dota2Service.reportTasks.runIfIdle(onBusy = { sendText(target, reportBusyMessage, replyMsgId) }) {
+            parts.isNotEmpty() && Dota2ReportMode.fromCommand(parts[0]) != null -> dota2Service.reportTasks.runIfIdle(onBusy = { sendText(target, reportBusyMessage, replyMsgId) }) {
                 try {
                     val mode = requireNotNull(Dota2ReportMode.fromCommand(parts[0]))
-                    val accountId = dota2Service.getBinding(senderId) ?: kotlin.run { sendText(target, "请先绑定账号", replyMsgId); return@runIfIdle }
-                    val matchId = try {
-                        resolveDotaReportMatchId(parts.getOrNull(1), mode) { dota2Service.getRecentMatches(accountId, 10) }
-                    } catch (e: IllegalArgumentException) {
-                        sendText(target, e.message ?: "参数无效", replyMsgId); return@runIfIdle
-                    }
+                    val (accountId, matchId) = resolveDotaReportTarget(parts, dota2Service.getBinding(senderId)) { dota2Service.getRecentMatches(it, 10) }
 
-                    val detail = measureDotaStage(matchId, "detail", mode) { dota2Service.getMatchDetail(matchId) } ?: kotlin.run { sendText(target, "获取比赛详情失败", replyMsgId); return@runIfIdle }
-                    val players = detail["players"]?.jsonArray
-                    if (players == null || players.none { it.jsonObject["account_id"]?.jsonPrimitive?.longOrNull == accountId }) {
-                        sendText(target, "该比赛中未找到你的账号", replyMsgId); return@runIfIdle
-                    }
-                    val me = players.find { it.jsonObject["account_id"]?.jsonPrimitive?.longOrNull == accountId }!!
-                    val isRadiant = me.jsonObject["isRadiant"]?.jsonPrimitive?.boolean ?: false
-                    val radiantWin = detail["radiant_win"]?.jsonPrimitive?.boolean ?: false
-                    val won = (isRadiant == radiantWin)
+                    val fetchedDetail = measureDotaStage(matchId, "detail", mode) { dota2Service.getMatchDetail(matchId) } ?: kotlin.run { sendText(target, "获取比赛详情失败", replyMsgId); return@runIfIdle }
+                    val (detail, won) = prepareDotaTargetMatch(fetchedDetail, matchId, accountId)
                     sendText(target, mode.progressText(matchId), replyMsgId)
                     dota2Service.generateMatchReport(detail, accountId, dsClient, config.api.model, won, mode).use { generated ->
                         val img = measureDotaStage(matchId, "draw", mode) { dota2MatchDraw(generated.report, imageConfig, fontRegistry) }
@@ -245,19 +235,6 @@ class MessageListener(
             }
             else -> sendText(target, dotaCommandHelp, replyMsgId)
         }
-    }
-
-    private suspend fun requestOverviewAnalysis(ov: PlayerOverview): String? {
-        val data = dota2Service.buildAnalysisData(ov)
-        val sys1 = "你是Dota2赛后分析师。基于近10局数据输出分析。"
-        val call1Msg = listOf(top.colter.dynamic.agent.ds.ChatMessage("system", sys1), top.colter.dynamic.agent.ds.ChatMessage("user", "玩家数据:\n$data"))
-        val call1Req = top.colter.dynamic.agent.ds.ChatRequest(model = config.api.model, messages = call1Msg, thinking = top.colter.dynamic.agent.ds.ThinkingConfig(type = "enabled"), maxTokens = 4096)
-        val part1 = dsClient.chat(call1Req).getOrNull()?.choices?.firstOrNull()?.message?.content ?: return null
-        val sys2 = "你是Dota2主教练。请写出最终诊断总结。"
-        val call2Msg = listOf(top.colter.dynamic.agent.ds.ChatMessage("system", sys2), top.colter.dynamic.agent.ds.ChatMessage("user", "分析:\n$part1\n\n数据:\n$data"))
-        val call2Req = top.colter.dynamic.agent.ds.ChatRequest(model = config.api.model, messages = call2Msg, thinking = top.colter.dynamic.agent.ds.ThinkingConfig(type = "enabled"), maxTokens = 2048)
-        val part2 = dsClient.chat(call2Req).getOrNull()?.choices?.firstOrNull()?.message?.content ?: return part1
-        return "$part1\n\n$part2"
     }
 
     private suspend fun sendText(target: TargetAddress, text: String, replyTo: String = "") {

@@ -22,15 +22,16 @@ import kotlin.coroutines.cancellation.CancellationException
 class Dota2Service(
     private val dataDir: File,
     private val cache: CacheUtils,
+    internal val apiBase: String = "https://api.opendota.com/api",
 ) {
     internal val reportTasks = Dota2ReportTaskGate()
+    internal val overviewDetails = OverviewDetailCache()
 
     private fun Exception.rethrowIfCancellation() {
         if (this is CancellationException) throw this
     }
 
     companion object {
-        private const val API_BASE = "https://api.opendota.com/api"
         private const val CDN_BASE = "https://cdn.cloudflare.steamstatic.com"
 
         val dota2SystemPrompt = """
@@ -49,15 +50,7 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
 (2) Death Weight: Every death subtracts. A carry's 15 deaths cost the team roughly the same as a support's 30 assists gain. Deaths >= 15 triggers criminal review.
 (3) Kill Quality: Kills matter more than assists. 14 kills is worth more than 9 kills + 24 assists — the former means you can solo-kill, the latter means you clean up.
 
-=== Style Rules ===
-- You are a drill sergeant humiliating a squad that just got wiped. Public execution style. No mercy.
-- Military/financial/medical metaphors: economic black hole, mobile ATM, reverse carry, backpack training, combat medic on life support
-- Weave numbers into sentences naturally, like casual trashtalk. Never use brackets or parentheses around numbers.
-- MVP: praise 3-4 lines with data, then roast 3-4 lines exposing fatal flaws. Even the MVP gets humiliated.
-- SVP: highlight 2 data bright spots, then burn 4-5 lines dismantling the "I tried" illusion — expose why the SVP is a fraud
-- Criminal: 6-7 lines of escalating humiliation. Start clinical, end barbaric. The last 2 lines should be pure personal attacks based on data.
-- EVERY section MUST end with exactly one line break + "— " followed by a Chinese gaming slang punchline. This is NON-NEGOTIABLE.
-- You have zero inventory data. Never let that stop you from roasting items — just roast the ABSENCE. "穷成这逼样BKB怕是影儿都没有" kills. "他但凡有个保命装" kills. "这经济水平跳刀都他妈是奢望" kills. What kills your credibility is ASSERTING they had an item you can't verify. Roast poverty, not hallucinated inventory.
+$dota2RoastStyle
 
 === Output Format (STRICT) ===
 [战犯]
@@ -134,7 +127,7 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
 
     suspend fun validatePlayer(accountId: Long): String? {
         return try {
-            val resp = HttpUtils.httpGetAsync("$API_BASE/players/$accountId")
+            val resp = HttpUtils.httpGetAsync("$apiBase/players/$accountId")
             if (resp.statusCode() !in 200..299) return null
             val data = HttpUtils.json.decodeFromString(JsonObject.serializer(), resp.body())
             data["profile"]?.jsonObject?.get("personaname")?.jsonPrimitive?.content
@@ -146,7 +139,7 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
 
     suspend fun getRecentMatches(accountId: Long, limit: Int = 1): JsonArray? {
         return try {
-            val resp = HttpUtils.httpGetAsync("$API_BASE/players/$accountId/recentMatches",
+            val resp = HttpUtils.httpGetAsync("$apiBase/players/$accountId/recentMatches",
                 params = mapOf("limit" to limit.toString()))
             if (resp.statusCode() !in 200..299) return null
             orderedRecentMatches(HttpUtils.json.decodeFromString(JsonArray.serializer(), resp.body()), limit)
@@ -158,7 +151,7 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
 
     suspend fun getMatchDetail(matchId: Long): JsonObject? {
         return try {
-            val resp = HttpUtils.httpGetAsync("$API_BASE/matches/$matchId")
+            val resp = HttpUtils.httpGetAsync("$apiBase/matches/$matchId")
             if (resp.statusCode() !in 200..299) return null
             HttpUtils.json.decodeFromString(JsonObject.serializer(), resp.body())
         } catch (e: Exception) {
@@ -178,7 +171,7 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
         constantsMutex.withLock {
             if (!heroConstantsLoaded) {
                 try {
-                    val heroResp = HttpUtils.httpGetAsync("$API_BASE/constants/heroes")
+                    val heroResp = HttpUtils.httpGetAsync("$apiBase/constants/heroes")
                     if (heroResp.statusCode() in 200..299) {
                         val heroObj = HttpUtils.json.decodeFromString(JsonObject.serializer(), heroResp.body())
                         if (heroObj.isNotEmpty()) {
@@ -200,7 +193,7 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
 
             if (!itemConstantsLoaded) {
                 try {
-                    val itemResp = HttpUtils.httpGetAsync("$API_BASE/constants/items")
+                    val itemResp = HttpUtils.httpGetAsync("$apiBase/constants/items")
                     if (itemResp.statusCode() in 200..299) {
                         val itemObj = HttpUtils.json.decodeFromString(JsonObject.serializer(), itemResp.body())
                         if (itemObj.isNotEmpty()) {
@@ -291,164 +284,6 @@ GPM%/DMG%/TWR% show how this player ranks among peers on the same hero. Use them
             e.rethrowIfCancellation()
             return null
         }
-    }
-
-    // ── Player Overview ──────────────────────────
-
-    suspend fun getPlayerOverview(accountId: Long): PlayerOverview? {
-        try {
-            val plResp = HttpUtils.httpGetAsync("$API_BASE/players/$accountId")
-            if (plResp.statusCode() !in 200..299) return null
-            val pl = HttpUtils.json.decodeFromString(JsonObject.serializer(), plResp.body())
-
-            val wlResp = HttpUtils.httpGetAsync("$API_BASE/players/$accountId/wl")
-            val wl = if (wlResp.statusCode() in 200..299) {
-                HttpUtils.json.decodeFromString(JsonObject.serializer(), wlResp.body())
-            } else {
-                return null
-            }
-
-            val totsResp = HttpUtils.httpGetAsync("$API_BASE/players/$accountId/totals")
-            val tots = if (totsResp.statusCode() in 200..299) HttpUtils.json.decodeFromString(JsonArray.serializer(), totsResp.body()) else JsonArray(emptyList())
-
-            val cntsResp = HttpUtils.httpGetAsync("$API_BASE/players/$accountId/counts")
-            val cnts = if (cntsResp.statusCode() in 200..299) HttpUtils.json.decodeFromString(JsonObject.serializer(), cntsResp.body()) else JsonObject(emptyMap())
-
-            val ms = getRecentMatches(accountId, 10) ?: JsonArray(emptyList())
-
-            fun avg(f: String): Int {
-                val td = tots.find { it.jsonObject["field"]?.jsonPrimitive?.content == f }?.jsonObject ?: return 0
-                val n = td["n"]?.jsonPrimitive?.intOrNull ?: return 0
-                if (n <= 0) return 0
-                return (td["sum"]?.jsonPrimitive?.doubleOrNull?.toInt() ?: 0) / n
-            }
-
-            fun cntWr(d: JsonObject, k: String): Pair<Int,Int> {
-                val v = d[k]?.jsonObject ?: return 0 to 0
-                return (v["win"]?.jsonPrimitive?.intOrNull ?: 0) to (v["games"]?.jsonPrimitive?.intOrNull ?: 0)
-            }
-
-            val recentW = ms.count { m ->
-                val s = m.jsonObject["player_slot"]?.jsonPrimitive?.intOrNull ?: 0
-                val rw = m.jsonObject["radiant_win"]?.jsonPrimitive?.boolean ?: false
-                (s < 128) == rw
-            }
-            val recentL = ms.size - recentW
-
-            var mk = 0; var mkh = 0; var mg = 0; var mgh = 0
-            ms.forEach { m ->
-                val o = m.jsonObject
-                val k = o["kills"]?.jsonPrimitive?.intOrNull ?: 0
-                if (k > mk) { mk = k; mkh = o["hero_id"]?.jsonPrimitive?.intOrNull ?: 0 }
-                val gm = o["gold_per_min"]?.jsonPrimitive?.intOrNull ?: 0
-                if (gm > mg) { mg = gm; mgh = o["hero_id"]?.jsonPrimitive?.intOrNull ?: 0 }
-            }
-
-            val profile = pl["profile"]?.jsonObject
-            val (rw1, rg1) = cntWr(cnts.getOrDefault("is_radiant", JsonObject(emptyMap())).jsonObject, "1")
-            val (rw0, rg0) = cntWr(cnts.getOrDefault("is_radiant", JsonObject(emptyMap())).jsonObject, "0")
-            val (apw, apg) = cntWr(cnts.getOrDefault("game_mode", JsonObject(emptyMap())).jsonObject, "22")
-            val (rdw, rdg) = cntWr(cnts.getOrDefault("game_mode", JsonObject(emptyMap())).jsonObject, "3")
-            val (rkw, rkg) = cntWr(cnts.getOrDefault("lobby_type", JsonObject(emptyMap())).jsonObject, "7")
-            val (nmw, nmg) = cntWr(cnts.getOrDefault("lobby_type", JsonObject(emptyMap())).jsonObject, "0")
-
-            return PlayerOverview(
-                playerName = profile?.get("personaname")?.jsonPrimitive?.content ?: "?",
-                steamAvatar = profile?.get("avatar")?.jsonPrimitive?.content ?: "",
-                rankTier = pl["rank_tier"]?.jsonPrimitive?.intOrNull ?: 0,
-                rankName = rankName(pl["rank_tier"]?.jsonPrimitive?.intOrNull ?: 0),
-                totalWins = wl["win"]?.jsonPrimitive?.intOrNull ?: 0,
-                totalLosses = wl["lose"]?.jsonPrimitive?.intOrNull ?: 0,
-                totalGames = (wl["win"]?.jsonPrimitive?.intOrNull ?: 0) + (wl["lose"]?.jsonPrimitive?.intOrNull ?: 0),
-                winRate = (wl["win"]?.jsonPrimitive?.doubleOrNull ?: 0.0) / maxOf(1, (wl["win"]?.jsonPrimitive?.intOrNull ?: 0) + (wl["lose"]?.jsonPrimitive?.intOrNull ?: 0)),
-                recentMatches = ms, recentWins = recentW, recentLosses = recentL,
-                recentWinRate = if (ms.size > 0) recentW.toDouble() / ms.size else 0.0,
-                avgKills = avg("kills"), avgDeaths = avg("deaths"), avgAssists = avg("assists"),
-                avgGpm = avg("gold_per_min"), avgXpm = avg("xp_per_min"), avgCs = avg("last_hits"),
-                avgHeroDmg = avg("hero_damage"), avgTowerDmg = avg("tower_damage"),
-                avgHeal = avg("hero_healing"), avgDur = avg("duration"),
-                maxKill = mk, maxKillHeroId = mkh, maxGpm = mg, maxGpmHeroId = mgh,
-                radiantWins = rw1, radiantGames = rg1, direWins = rw0, direGames = rg0,
-                allPickWins = apw, allPickGames = apg,
-                rdWins = rdw, rdGames = rdg,
-                rankedWins = rkw, rankedGames = rkg,
-                normalWins = nmw, normalGames = nmg,
-            )
-        } catch (e: Exception) {
-            e.rethrowIfCancellation()
-            return null
-        }
-    }
-
-    fun buildAnalysisData(ov: PlayerOverview): String {
-        val sb = StringBuilder()
-        sb.appendLine("玩家: ${ov.playerName} (${ov.rankName}) 总场次${ov.totalGames} 胜率${"%.1f".format(ov.winRate * 100)}%")
-        sb.appendLine("近10场: ${ov.recentWins}胜${ov.recentLosses}负 生涯均值: ${ov.avgKills}/${ov.avgDeaths}/${ov.avgAssists} GPM${ov.avgGpm} XPM${ov.avgXpm}")
-        sb.appendLine()
-
-        val lanes = mutableMapOf<String, MutableList<JsonObject>>()
-        ov.recentMatches.forEach { m ->
-            val o = m.jsonObject
-            val lr = o["lane_role"]?.jsonPrimitive?.intOrNull ?: -1
-            val ln = when(lr) { 1->"优势路"; 2->"中路"; 3->"劣势路"; 4->"打野"; else->"未知" }
-            lanes.getOrPut(ln) { mutableListOf() }.add(o)
-        }
-        lanes.forEach { (lane, games) ->
-            val wins = games.count { g ->
-                val s = g["player_slot"]?.jsonPrimitive?.intOrNull ?: 0
-                val rw = g["radiant_win"]?.jsonPrimitive?.boolean ?: false
-                (s < 128) == rw
-            }
-            val gpmAvg = games.sumOf { it["gold_per_min"]?.jsonPrimitive?.intOrNull ?: 0 } / games.size
-            val avgK = games.sumOf { it["kills"]?.jsonPrimitive?.intOrNull ?: 0 } / games.size
-            val avgD = games.sumOf { it["deaths"]?.jsonPrimitive?.intOrNull ?: 1 } / games.size
-            val avgA = games.sumOf { it["assists"]?.jsonPrimitive?.intOrNull ?: 0 } / games.size
-            sb.appendLine("位置[$lane]: ${games.size}局 ${wins}胜(${wins*100/games.size}%) 均KDA $avgK/$avgD/$avgA 均GPM $gpmAvg")
-        }
-        sb.appendLine()
-
-        ov.recentMatches.forEachIndexed { i, m ->
-            val o = m.jsonObject
-            val s = o["player_slot"]?.jsonPrimitive?.intOrNull ?: 0
-            val rw = o["radiant_win"]?.jsonPrimitive?.boolean ?: false
-            val won = (s < 128) == rw
-            val hid = o["hero_id"]?.jsonPrimitive?.intOrNull ?: 0
-            val k = o["kills"]?.jsonPrimitive?.intOrNull ?: 0
-            val d = o["deaths"]?.jsonPrimitive?.intOrNull ?: 0
-            val a = o["assists"]?.jsonPrimitive?.intOrNull ?: 0
-            val gpm = o["gold_per_min"]?.jsonPrimitive?.intOrNull ?: 0
-            val xpm = o["xp_per_min"]?.jsonPrimitive?.intOrNull ?: 0
-            val dmg = o["hero_damage"]?.jsonPrimitive?.intOrNull ?: 0
-            val du = o["duration"]?.jsonPrimitive?.intOrNull ?: 0
-            val lhr = o["lane_role"]?.jsonPrimitive?.intOrNull ?: -1
-            val durMin = du / 60
-            sb.appendLine("${i+1}. ${if(won)"胜" else "负"} ${heroName(hid)} $k/$d/$a GPM$gpm XPM$xpm 伤害$dmg ${durMin}分 位置$lhr")
-        }
-        return sb.toString()
-    }
-
-    fun selectWorstMatches(ov: PlayerOverview, count: Int = 2): List<Int> {
-        data class Score(val idx: Int, val score: Double)
-        return ov.recentMatches.mapIndexed { i, m ->
-            val o = m.jsonObject
-            val k = o["kills"]?.jsonPrimitive?.intOrNull ?: 0
-            val d = kotlin.math.max(1, o["deaths"]?.jsonPrimitive?.intOrNull ?: 1)
-            val a = o["assists"]?.jsonPrimitive?.intOrNull ?: 0
-            val gpm = o["gold_per_min"]?.jsonPrimitive?.intOrNull ?: 0
-            val dmg = o["hero_damage"]?.jsonPrimitive?.intOrNull ?: 0
-            val du = (o["duration"]?.jsonPrimitive?.intOrNull ?: 1).coerceAtLeast(1)
-            val s = o["player_slot"]?.jsonPrimitive?.intOrNull ?: 0
-            val rw = o["radiant_win"]?.jsonPrimitive?.boolean ?: false
-            val won = (s < 128) == rw
-            val deathPenalty = d * 2.0 / du * 60
-            val partRate = (k + a).toDouble() / du * 60
-            val partPenalty = if (partRate < 1.0) (1.0 - partRate) * 5 else 0.0
-            val gpmPenalty = if (gpm < 300) (300 - gpm).toDouble() / 50 else 0.0
-            val dmgPenalty = if (dmg < 10000) (10000.0 - dmg) / 2000 else 0.0
-            val lossMul = if (won) 1.0 else 1.5
-            val score = (deathPenalty + partPenalty + gpmPenalty + dmgPenalty) * lossMul
-            Score(i, score)
-        }.sortedByDescending { it.score }.take(count).map { it.idx }
     }
 
     // ── Match Analysis ───────────────────────────

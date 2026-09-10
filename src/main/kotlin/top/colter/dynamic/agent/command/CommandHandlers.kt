@@ -10,8 +10,12 @@ import top.colter.dynamic.agent.dota2.Dota2ReportMode
 import top.colter.dynamic.agent.dota2.reportBusyMessage
 import top.colter.dynamic.agent.dota2.dotaCommandHelp
 import top.colter.dynamic.agent.dota2.Dota2Service
-import top.colter.dynamic.agent.dota2.PlayerOverview
-import top.colter.dynamic.agent.dota2.resolveDotaReportMatchId
+import top.colter.dynamic.agent.dota2.OverviewMode
+import top.colter.dynamic.agent.dota2.overviewAccount
+import top.colter.dynamic.agent.dota2.generateOverview
+import top.colter.dynamic.agent.dota2.prepareDotaTargetMatch
+import top.colter.dynamic.agent.dota2.resolveDotaReportTarget
+import top.colter.dynamic.agent.dota2.dotaPlayerAccount
 import top.colter.dynamic.agent.dota2.historyCommandHint
 import top.colter.dynamic.agent.dota2.historyTextFallback
 import top.colter.dynamic.agent.dota2.measureDotaStage
@@ -131,16 +135,26 @@ class CommandHandlers(
     }
 
     inner class DotaHandler : CommandHandler {
-        override val spec = CommandSpec(path = listOf("dota"),             aliases = listOf(listOf("d2")), description = "Dota2：绑定、历史、战报（关闭思考）、深度战报（开启思考）、分析、个人详情")
+        override val spec = CommandSpec(path = listOf("dota"),             aliases = listOf(listOf("d2")), description = "Dota2：绑定、历史、战报（关闭思考）、深度战报（开启思考）、分析、个人详情、深度个人详情")
 
         override suspend fun handle(invocation: CommandInvocation): CommandExecutionResult {
             val args = invocation.args; val sid = invocation.context.senderId
             return when {
                 args.size == 2 && args[0] == "绑定" -> handleBind(args[1], sid)
-                args.size == 1 && args[0] == "历史" -> handleHistory(sid)
-                args.isNotEmpty() && args[0] == "个人详情" -> handleOverview(args, sid)
+                args.size in 1..2 && args[0] == "历史" -> try { handleHistory(args, sid) } catch (e: IllegalArgumentException) { fail(e.message ?: "参数无效") }
+                args.isNotEmpty() && OverviewMode.fromCommand(args[0]) != null -> dota2Service.reportTasks.runIfIdle(onBusy = { fail(reportBusyMessage) }) {
+                    try {
+                        val result = handleOverview(args, invocation)
+                        pluginContext.messagePublisher.sendBatches(invocation.context.target, result.reply,
+                            options = top.colter.dynamic.core.plugin.PluginMessagePublishOptions(replyToMessageId = invocation.replyToMessageId.ifEmpty { null })).requireAccepted()
+                        result.copy(reply = emptyList())
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        fail("个人详情生成或发送失败: ${e.message ?: "未知错误"}")
+                    }
+                }
                 args.size == 2 && args[0] == "分析" -> handleFullAnalyze(args[1])
-                args.size in 1..2 && Dota2ReportMode.fromCommand(args[0]) != null -> dota2Service.reportTasks.runIfIdle(onBusy = { fail(reportBusyMessage) }) {
+                args.isNotEmpty() && Dota2ReportMode.fromCommand(args[0]) != null -> dota2Service.reportTasks.runIfIdle(onBusy = { fail(reportBusyMessage) }) {
                     try {
                         val result = handleReport(args, invocation)
                         // 保留名额直到宿主接受投递；返回空回复避免重复发送。
@@ -164,30 +178,26 @@ class CommandHandlers(
             dota2Service.setBinding(senderId, id); return ok("已绑定: $name (ID=$id)")
         }
 
-        private suspend fun handleHistory(senderId: String): CommandExecutionResult {
-            val aid = dota2Service.getBinding(senderId) ?: return fail("请先绑定账号")
+        private suspend fun handleHistory(args: List<String>, senderId: String): CommandExecutionResult {
+            val aid = dotaPlayerAccount(args.getOrNull(1), dota2Service.getBinding(senderId))
             val ms = dota2Service.getRecentMatches(aid, 10) ?: return fail("未找到对局记录")
             if (ms.isEmpty()) return fail("未找到对局记录")
-            val hint = historyCommandHint(ms.size)
+            val hint = historyCommandHint(ms.size, aid)
             val img = dota2HistoryDraw(aid, ms, imageConfig, fontRegistry, dota2Service)
             if (img != null) return imageResult(img, "dota2_history.png", hint)
             return ok("${historyTextFallback(ms)}\n\n$hint")
         }
 
-        private suspend fun handleOverview(args: List<String>, senderId: String): CommandExecutionResult {
-            val aid = if (args.size >= 2) args[1].toLongOrNull() else dota2Service.getBinding(senderId) ?: return fail("请先绑定账号")
-            val ov = dota2Service.getPlayerOverview(aid!!) ?: return fail("获取玩家数据失败")
-            val analysisText = requestOverviewAnalysis(ov)
-            val worstIdx = dota2Service.selectWorstMatches(ov, 2)
-            val worstMatches = worstIdx.mapNotNull { ov.recentMatches.getOrNull(it)?.jsonObject }
-            val worstDetails = worstMatches.mapNotNull { m ->
-                val mid = m["match_id"]?.jsonPrimitive?.longOrNull ?: return@mapNotNull null
-                val detail = dota2Service.getMatchDetail(mid)
-                if (detail != null) m to detail else null
+        private suspend fun handleOverview(args: List<String>, invocation: CommandInvocation): CommandExecutionResult {
+            val aid = overviewAccount(args, dota2Service.getBinding(invocation.context.senderId))
+            val mode = requireNotNull(OverviewMode.fromCommand(args[0]))
+            pluginContext.messagePublisher.sendText(invocation.context.target,
+                "正在生成玩家 #$aid 的${mode.command}，请稍候。",
+                options = top.colter.dynamic.core.plugin.PluginMessagePublishOptions(replyToMessageId = invocation.replyToMessageId.ifEmpty { null })).requireAccepted()
+            dota2Service.generateOverview(aid, mode, dsClient, config.api.model).use { generated ->
+                val image = dota2OverviewDraw(generated, imageConfig, fontRegistry)
+                return imageResult(image, "dota2_overview_${aid}_${mode.name.lowercase()}.png", generated.analysis.notice)
             }
-            val img = dota2OverviewDraw(aid, dota2Service, analysisText, worstDetails, imageConfig, fontRegistry)
-            if (img != null) return imageResult(img, "dota2_overview.png")
-            return ok(analysisText ?: "分析失败")
         }
 
         private suspend fun handleFullAnalyze(midStr: String): CommandExecutionResult {
@@ -206,15 +216,9 @@ class CommandHandlers(
         private suspend fun handleReport(args: List<String>, invocation: CommandInvocation): CommandExecutionResult {
             val senderId = invocation.context.senderId
             val mode = requireNotNull(Dota2ReportMode.fromCommand(args[0]))
-            val aid = dota2Service.getBinding(senderId) ?: return fail("请先绑定账号")
-            val mid = try {
-                resolveDotaReportMatchId(args.getOrNull(1), mode) { dota2Service.getRecentMatches(aid, 10) }
-            } catch (e: IllegalArgumentException) { return fail(e.message ?: "参数无效") }
-            val detail = measureDotaStage(mid, "detail", mode) { dota2Service.getMatchDetail(mid) } ?: return fail("获取比赛详情失败")
-            val players = detail["players"]?.jsonArray
-            if (players == null || players.none { it.jsonObject["account_id"]?.jsonPrimitive?.longOrNull == aid }) return fail("该比赛中未找到你的账号")
-            val me = players.find { it.jsonObject["account_id"]?.jsonPrimitive?.longOrNull == aid }!!
-            val won = ((me.jsonObject["isRadiant"]?.jsonPrimitive?.boolean ?: false) == (detail["radiant_win"]?.jsonPrimitive?.boolean ?: false))
+            val (aid, mid) = resolveDotaReportTarget(args, dota2Service.getBinding(senderId)) { dota2Service.getRecentMatches(it, 10) }
+            val fetchedDetail = measureDotaStage(mid, "detail", mode) { dota2Service.getMatchDetail(mid) } ?: return fail("获取比赛详情失败")
+            val (detail, won) = prepareDotaTargetMatch(fetchedDetail, mid, aid)
             pluginContext.messagePublisher.sendText(invocation.context.target, mode.progressText(mid),
                 options = top.colter.dynamic.core.plugin.PluginMessagePublishOptions(replyToMessageId = invocation.replyToMessageId.ifEmpty { null })).requireAccepted()
             dota2Service.generateMatchReport(detail, aid, dsClient, config.api.model, won, mode).use { generated ->
@@ -224,15 +228,5 @@ class CommandHandlers(
             }
         }
 
-        private suspend fun requestOverviewAnalysis(ov: PlayerOverview): String? {
-            val data = dota2Service.buildAnalysisData(ov)
-            val call1Msg = listOf(top.colter.dynamic.agent.ds.ChatMessage("system", "你是Dota2赛后分析师。"), top.colter.dynamic.agent.ds.ChatMessage("user", "数据:\n$data"))
-            val call1Req = top.colter.dynamic.agent.ds.ChatRequest(model = config.api.model, messages = call1Msg, thinking = top.colter.dynamic.agent.ds.ThinkingConfig(type = "enabled"), maxTokens = 4096)
-            val part1 = dsClient.chat(call1Req).getOrNull()?.choices?.firstOrNull()?.message?.content ?: return null
-            val call2Msg = listOf(top.colter.dynamic.agent.ds.ChatMessage("system", "你是Dota2主教练。"), top.colter.dynamic.agent.ds.ChatMessage("user", "分析:\n$part1\n\n数据:\n$data"))
-            val call2Req = top.colter.dynamic.agent.ds.ChatRequest(model = config.api.model, messages = call2Msg, thinking = top.colter.dynamic.agent.ds.ThinkingConfig(type = "enabled"), maxTokens = 2048)
-            val part2 = dsClient.chat(call2Req).getOrNull()?.choices?.firstOrNull()?.message?.content ?: return part1
-            return "$part1\n\n$part2"
-        }
     }
 }

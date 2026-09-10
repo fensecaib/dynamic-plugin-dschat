@@ -3,8 +3,8 @@ package top.colter.dynamic.agent.dota2
 import io.github.oshai.kotlinlogging.KotlinLogging
 import org.jetbrains.skia.Image
 
-internal class Dota2ReportAssets(val heroes: Map<Int, Image?>, val items: Map<Int, Image?>) : AutoCloseable {
-    override fun close() { (heroes.values + items.values).filterNotNull().forEach { it.close() } }
+internal class Dota2ReportAssets(val heroes: Map<Int, Image?>, val items: Map<Int, Image?>, val avatar: Image? = null) : AutoCloseable {
+    override fun close() { (heroes.values + items.values + avatar).filterNotNull().forEach { it.close() } }
 }
 
 internal class GeneratedDota2Report(

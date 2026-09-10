@@ -7,6 +7,45 @@ import top.colter.dynamic.agent.draw.historyWon
 import kotlin.test.*
 
 class Dota2HistoryTest {
+    @Test fun `explicit player queries use selected account and preserve legacy match IDs`() = runBlocking<Unit> {
+        val recent=JsonArray((1L..10L).map { match(1000+it,it) })
+        for(mode in Dota2ReportMode.entries) for(n in 1..10) {
+            val result=resolveDotaReportTarget(listOf(mode.command,"176496411",n.toString()),999) { account ->
+                assertEquals(176496411L,account);recent
+            }
+            assertEquals(176496411L to (1011L-n),result)
+        }
+        assertEquals(176496411L to 1010L,resolveDotaReportTarget(listOf("战报","176496411","1"),null) { recent })
+        assertEquals(999L to 1010L,resolveDotaReportTarget(listOf("战报"),999) { assertEquals(999L,it);recent })
+        assertEquals(999L to 8980854337L,resolveDotaReportTarget(listOf("战报","8980854337"),999) { error("must not fetch") })
+        assertEquals(176496411L,dotaPlayerAccount("176496411",999))
+        assertTrue(historyCommandHint(10,176496411).contains("/dota 战报 176496411 N"))
+        for(args in listOf(listOf("战报","176496411","0"),listOf("战报","176496411","11"),listOf("战报","abc","1"),listOf("战报","4294967296","1"),listOf("战报","176496411","1","2"))) {
+            assertFailsWith<IllegalArgumentException> { resolveDotaReportTarget(args,999) { error("must not fetch") } }
+        }
+        assertFailsWith<IllegalArgumentException> { resolveDotaReportTarget(listOf("战报","176496411","10"),null) { JsonArray(listOf(match(11))) } }
+        assertFailsWith<IllegalArgumentException> { resolveDotaReportTarget(listOf("战报"),null) { error("must not fetch") } }
+    }
+
+    @Test fun `target match validates identity and normalizes both teams before analysis`() {
+        fun player(id:Long,slot:Int)=buildJsonObject { put("account_id",id);put("player_slot",slot) }
+        val raw=buildJsonObject { put("match_id",100);put("radiant_win",true);putJsonArray("players") { add(player(1,0));add(player(2,128)) } }
+        val radiant=prepareDotaTargetMatch(raw,100,1)
+        val dire=prepareDotaTargetMatch(raw,100,2)
+        assertTrue(radiant.won);assertFalse(dire.won)
+        assertEquals(listOf(true,false),radiant.detail["players"]!!.jsonArray.map { it.jsonObject["isRadiant"]!!.jsonPrimitive.boolean })
+        assertEquals(raw["players"]!!.jsonArray[0].jsonObject["isRadiant"],null) // Original response remains immutable.
+        assertEquals(radiant,prepareDotaTargetMatch(radiant.detail,100,1))
+        assertFailsWith<IllegalArgumentException> { prepareDotaTargetMatch(raw,101,1) }
+        assertFailsWith<IllegalArgumentException> { prepareDotaTargetMatch(raw,100,3) }
+        assertFailsWith<IllegalArgumentException> { prepareDotaTargetMatch(JsonObject(raw-"radiant_win"),100,1) }
+        for(bad in listOf(player(1,77),JsonObject(player(1,0)+("isRadiant" to JsonPrimitive(false))))) {
+            assertFailsWith<IllegalArgumentException> { prepareDotaTargetMatch(JsonObject(raw+("players" to JsonArray(listOf(bad)))),100,1) }
+        }
+        val explicit=JsonObject(raw+("players" to JsonArray(listOf(buildJsonObject { put("account_id",1);put("isRadiant",true) }))))
+        assertTrue(prepareDotaTargetMatch(explicit,100,1).won)
+    }
+
     private fun match(id: Long, time: Long? = null) = buildJsonObject {
         put("match_id", id); if (time != null) put("start_time", time)
     }
