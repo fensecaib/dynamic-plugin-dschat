@@ -1,35 +1,7 @@
 package top.colter.dynamic.agent.dota2
 
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonArray
 import org.jetbrains.skia.Image
-
-@Serializable
-data class PlayerOverview(
-    val playerName: String = "?",
-    val steamAvatar: String = "",
-    val rankTier: Int = 0,
-    val rankName: String = "",
-    val totalWins: Int = 0,
-    val totalLosses: Int = 0,
-    val totalGames: Int = 0,
-    val winRate: Double = 0.0,
-    val recentMatches: JsonArray = JsonArray(emptyList()),
-    val recentWins: Int = 0,
-    val recentLosses: Int = 0,
-    val recentWinRate: Double = 0.0,
-    val avgKills: Int = 0, val avgDeaths: Int = 0, val avgAssists: Int = 0,
-    val avgGpm: Int = 0, val avgXpm: Int = 0, val avgCs: Int = 0,
-    val avgHeroDmg: Int = 0, val avgTowerDmg: Int = 0, val avgHeal: Int = 0, val avgDur: Int = 0,
-    val maxKill: Int = 0, val maxKillHeroId: Int = 0,
-    val maxGpm: Int = 0, val maxGpmHeroId: Int = 0,
-    val radiantWins: Int = 0, val radiantGames: Int = 0,
-    val direWins: Int = 0, val direGames: Int = 0,
-    val allPickWins: Int = 0, val allPickGames: Int = 0,
-    val rdWins: Int = 0, val rdGames: Int = 0,
-    val rankedWins: Int = 0, val rankedGames: Int = 0,
-    val normalWins: Int = 0, val normalGames: Int = 0,
-)
 
 @Serializable
 data class DsAnalysisResult(

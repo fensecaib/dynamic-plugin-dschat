@@ -91,7 +91,7 @@ OneBot/Telegram → IncomingMessagePipeline
     │   ├─ 历史      → getRecentMatches() → dota2HistoryDraw()
     │   ├─ 战报 [ID] → analyzeMatch() → dota2MatchDraw()
     │   ├─ 分析 <ID> → analyzeFullMatch() → dota2FullAnalyzeDraw()
-    │   └─ 个人详情  → getPlayerOverview() → dota2OverviewDraw()
+    │   └─ 个人详情 / 深度个人详情 → generateOverview() → 固定最近十场及详情 → 结构化分析 / 资源准备 → dota2OverviewDraw()
     │
     └─ @Bot (普通文本) → mentions.contains(botId) → handleChat()
         触发条件: config.trigger.enableAtTrigger=true 且 消息中@了Bot自身

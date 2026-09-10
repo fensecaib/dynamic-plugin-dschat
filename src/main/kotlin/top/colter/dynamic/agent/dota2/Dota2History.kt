@@ -32,9 +32,50 @@ internal suspend fun resolveDotaReportMatchId(
         ?.takeIf { it > 0 } ?: throw IllegalArgumentException("该场缺少有效比赛ID，请使用完整比赛ID查询")
 }
 
-internal fun historyCommandHint(count: Int): String =
-    "查看最近第N场：/dota 战报 N（N为1～$count）。\n序号按实时最新战绩查询；精确查询：/dota 战报 比赛ID\n普通战报关闭思考；需要开启思考时使用 /dota 深度战报 [序号或比赛ID]，预计约需1～3分钟。"
+/** Explicit player queries do not depend on or mutate the caller's binding. */
+internal fun dotaPlayerAccount(argument: String?, binding: Long?): Long {
+    if(argument==null) return requireNotNull(binding?.takeIf { it in 1..4294967295L }) { "请先绑定账号，或填写玩家ID" }
+    return requireNotNull(argument.takeIf { it.isNotEmpty() && it.all { c -> c in '0'..'9' } }?.toLongOrNull()?.takeIf { it in 1..4294967295L }) { "请输入有效的玩家ID（1～4294967295）" }
+}
+
+internal suspend fun resolveDotaReportTarget(
+    args: List<String>, binding: Long?, fetchRecent: suspend (Long) -> JsonArray?,
+): Pair<Long,Long> {
+    val mode=requireNotNull(Dota2ReportMode.fromCommand(args.firstOrNull())) { "未知战报指令" }
+    require(args.size in 1..3) { "用法：/dota ${mode.command} [序号或比赛ID]，或 /dota ${mode.command} 玩家ID 序号（1～10）" }
+    val explicit=args.size==3
+    val account=dotaPlayerAccount(if(explicit)args[1] else null,binding)
+    val argument=if(explicit)args[2] else args.getOrNull(1)
+    if(explicit) require(argument?.toIntOrNull() in 1..10) { "指定玩家时，比赛序号必须为1～10" }
+    return account to resolveDotaReportMatchId(argument,mode) { fetchRecent(account) }
+}
+
+internal fun historyCommandHint(count: Int, accountId: Long? = null): String {
+    val prefix=accountId?.let { "$it " }.orEmpty()
+    return "查战报：/dota 战报 ${prefix}N（N=1～$count，1为最新，随新对局顺延）。开启思考用“深度战报”。"
+}
 
 internal fun historyTextFallback(matches: JsonArray): String = matches.mapIndexed { i, match ->
     "${i + 1}. ${match.jsonObject["match_id"]?.jsonPrimitive?.contentOrNull ?: "—"}"
 }.joinToString("\n", prefix = "最近${matches.size}场（最新在前）：\n")
+
+/** Normalize the response once so winner selection, AI input and cards use identical sides. */
+internal data class DotaTargetMatch(val detail: JsonObject, val won: Boolean)
+
+internal fun prepareDotaTargetMatch(detail: JsonObject, expectedMatchId: Long, accountId: Long): DotaTargetMatch {
+    require((detail["match_id"] as? JsonPrimitive)?.longOrNull == expectedMatchId) { "返回的比赛ID与请求不一致，请重试" }
+    val players=(detail["players"] as? JsonArray)?.map { it as? JsonObject ?: throw IllegalArgumentException("比赛玩家数据不完整") }
+        ?: throw IllegalArgumentException("比赛缺少玩家数据")
+    require(players.count { (it["account_id"] as? JsonPrimitive)?.longOrNull == accountId } == 1) { "该比赛中未找到唯一的玩家 #$accountId" }
+    val radiantWin=requireNotNull((detail["radiant_win"] as? JsonPrimitive)?.booleanOrNull) { "比赛结果尚不可用，请稍后重试" }
+    val normalized=players.map { player ->
+        val explicit=(player["isRadiant"] as? JsonPrimitive)?.booleanOrNull
+        val slot=(player["player_slot"] as? JsonPrimitive)?.intOrNull
+        val fromSlot=when(slot) { in 0..4 -> true; in 128..132 -> false; else -> null }
+        require(explicit==null || fromSlot==null || explicit==fromSlot) { "玩家阵营数据冲突，请稍后重试" }
+        val side=requireNotNull(explicit ?: fromSlot) { "玩家阵营数据缺失，请稍后重试" }
+        JsonObject(player+("isRadiant" to JsonPrimitive(side)))
+    }
+    val target=normalized.single { (it["account_id"] as? JsonPrimitive)?.longOrNull == accountId }
+    return DotaTargetMatch(JsonObject(detail+("players" to JsonArray(normalized))),target["isRadiant"]!!.jsonPrimitive.boolean==radiantWin)
+}

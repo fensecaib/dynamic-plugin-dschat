@@ -7,7 +7,7 @@ enum class Dota2ReportMode(val command: String, val thinkingType: String) {
 
     fun progressText(matchId: Long): String = when (this) {
         NORMAL -> "正在生成比赛 #$matchId 的战报..."
-        DEEP -> "正在生成比赛 #$matchId 的深度战报，已开启思考，预计约需 1～3 分钟，实际耗时可能波动。"
+        DEEP -> "正在生成深度战报 #$matchId，请稍候。"
     }
 
     companion object {
@@ -16,14 +16,13 @@ enum class Dota2ReportMode(val command: String, val thinkingType: String) {
 }
 
 internal val dotaCommandHelp = """
-    Dota2 指令：
-    /dota 绑定 <9位ID>：绑定 Dota2 账号
-    /dota 历史：查看最近 10 场战绩，最新在前
-    /dota 战报 [序号或比赛ID]：普通战报，关闭思考，出报更快
-    /dota 深度战报 [序号或比赛ID]：开启思考，预计约需 1～3 分钟，耗时可能波动
-    两种战报均支持：不填查最新一场；1～10 查实时最近第 N 场；大于 10 的正整数按比赛 ID 查询。
-    无需先查历史；有新比赛时序号会顺延，精确查询请使用比赛 ID。
-    普通战报与深度战报共用一个任务名额，忙碌时请等待完成后重发，不排队。
-    /dota 分析 <比赛ID>：双阵营完整分析
-    /dota 个人详情 [ID]：玩家数据与 AI 诊断，不填使用绑定账号
+    Dota2 指令（<必填>，[可选]，括号不用输入）：
+    /dota 绑定 <玩家ID>
+    /dota 历史 [玩家ID]：最近10场
+    /dota 战报 [序号或比赛ID]
+    /dota 战报 <玩家ID> <序号>：指定玩家
+    /dota 个人详情 [玩家ID]：最近10场分析
+    /dota 分析 <比赛ID>：双阵营分析
+    战报、个人详情加“深度”前缀可开启思考，耗时更长。
+    不填玩家用绑定账号；战报不填参数查最新。序号1～10，1为最新；单参数>10按比赛ID。
 """.trimIndent()
