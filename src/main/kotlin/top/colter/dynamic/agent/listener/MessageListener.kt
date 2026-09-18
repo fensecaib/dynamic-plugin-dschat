@@ -16,6 +16,9 @@ import top.colter.dynamic.agent.dota2.generateOverview
 import top.colter.dynamic.agent.dota2.prepareDotaTargetMatch
 import top.colter.dynamic.agent.dota2.resolveDotaReportTarget
 import top.colter.dynamic.agent.dota2.dotaPlayerAccount
+import top.colter.dynamic.agent.dota2.dotaQueryRequiresBinding
+import top.colter.dynamic.agent.dota2.hasDotaBinding
+import top.colter.dynamic.agent.dota2.dotaBindingRequired
 import top.colter.dynamic.agent.dota2.historyCommandHint
 import top.colter.dynamic.agent.dota2.historyTextFallback
 import top.colter.dynamic.agent.dota2.measureDotaStage
@@ -164,6 +167,10 @@ class MessageListener(
         cmd: String, target: TargetAddress, senderId: String, replyMsgId: String
     ) {
         val parts = cmd.split(Regex("[\\s\\u3000]+")).filter { it.isNotBlank() }
+
+        if (dotaQueryRequiresBinding(parts.firstOrNull()) && !hasDotaBinding(dota2Service.getBinding(senderId))) {
+            sendText(target, dotaBindingRequired, replyMsgId); return
+        }
 
         when {
             parts.size == 2 && parts[0] == "绑定" -> {

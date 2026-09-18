@@ -6,7 +6,7 @@ plugins {
 apply(from = "gradle/dynamic-plugin-fatjar.gradle.kts")
 
 group = "top.colter.dynamic"
-version = "0.0.4"
+version = "0.0.5"
 
 repositories {
     mavenLocal()
@@ -15,7 +15,8 @@ repositories {
 
 dependencies {
     val coroutinesVersion = "1.11.0"
-    val coreVersion = "0.0.3"
+    // core 0.0.4 对应插件 API 3.0.0，与 plugin.yml 保持一致。
+    val coreVersion = "0.0.4"
     val kotlinLoggingVersion = "8.0.4"
     val serializationVersion = "1.11.0"
 

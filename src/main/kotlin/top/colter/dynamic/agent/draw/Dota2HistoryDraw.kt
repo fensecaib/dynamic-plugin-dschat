@@ -121,8 +121,8 @@ suspend fun dota2HistoryDraw(
         }
         val footerY = 180f + matches.size * 77
         rect(0f, footerY, 1060f, 68f, C_ODD)
-        label("查看最近第 N 场：/dota 战报 N（1～10） · 精确查询：/dota 战报 比赛ID", 22f, footerY + 6f, 1016f)
-        label("普通战报关闭思考 · /dota 深度战报 [序号或比赛ID] 开启思考 · 新比赛使序号顺延 · — 暂无数据", 22f, footerY + 34f, 1016f, C_DIM, 12f)
+        label("查看该玩家第 N 场：/dota 战报 $accountId N（1～10，不填 N 查最新）", 22f, footerY + 6f, 1016f)
+        label("精确查询：/dota 战报 比赛 <比赛ID>（绑定账号） · 深度战报开启思考 · 新比赛使序号顺延", 22f, footerY + 34f, 1016f, C_DIM, 12f)
         surface.makeImageSnapshot()
     } } finally {
         // 服务加载的图标是本次调用创建的 Skia 对象；预览传入的图标由调用者管理。

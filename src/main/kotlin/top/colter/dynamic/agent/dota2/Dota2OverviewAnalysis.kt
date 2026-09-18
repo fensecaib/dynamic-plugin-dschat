@@ -8,7 +8,7 @@ import kotlin.coroutines.cancellation.CancellationException
 internal val overviewDimensions = linkedMapOf("economy" to "经济与成长", "output" to "输出与推进", "survival" to "死亡与参与", "heroes" to "英雄与稳定性")
 internal data class OverviewSection(val id: String, val title: String, val body: String, val isFallback: Boolean = false)
 internal data class OverviewAnalysis(val sections: List<OverviewSection>, val notice: String? = null, val rawResponse: String? = null, val validationError: String? = null) {
-    fun body(id: String) = sections.firstOrNull { it.id == id }?.body.orEmpty()
+    fun body(id: String) = sections.firstOrNull { it.id == id }?.body.orEmpty().let(::normalizeOverviewText)
 }
 
 internal fun OverviewSnapshot.sectionTitles(): Map<String, String> = linkedMapOf("overview" to "近期表现总览").apply {
@@ -68,14 +68,22 @@ internal fun overviewRequest(snapshot: OverviewSnapshot, mode: OverviewMode, mod
         thinking = ThinkingConfig(mode.thinking), maxTokens = 6144, responseFormat = mapOf("type" to "json_object"))
 }
 
+/** Models sometimes double-escape newlines inside an otherwise valid JSON string. */
+internal fun normalizeOverviewText(value: String): String = value
+    .replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+    .replace("\r\n", "\n").replace('\r', '\n')
+
+internal fun overviewTextSegments(value: String): List<String> =
+    Regex("""[^。！？!?\n]+[。！？!?]?\n*|\n+""").findAll(value).map { it.value }.toList()
+
 /** Shorten at sentence boundaries only. Unbounded/very short/malformed output never reaches the image. */
 internal fun compactOverviewBody(value: String, target: Int): String {
-    val clean = value.trim().replace(Regex("[\t\r ]+"), " ")
+    val clean = normalizeOverviewText(value).trim().replace(Regex("[\t\r ]+"), " ")
     if (clean.length <= target) return clean
     val ending = Regex("\n— [^\n]+$").find(clean)?.value.orEmpty()
     val content = if(ending.isEmpty()) clean else clean.removeSuffix(ending)
     val budget = target-ending.length
-    val sentences = Regex("[^。！？!?]+[。！？!?]?").findAll(content).map { it.value.trim() }.toList()
+    val sentences = overviewTextSegments(content)
     var result = ""
     for (sentence in sentences) { if (result.length + sentence.length > budget) break; result += sentence }
     require(result.length >= target / 2) { "正文长句无法安全收束" }
