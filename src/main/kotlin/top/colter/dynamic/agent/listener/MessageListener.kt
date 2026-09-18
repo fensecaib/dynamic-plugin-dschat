@@ -9,6 +9,7 @@ import top.colter.dynamic.agent.config.ImageConfig
 import top.colter.dynamic.agent.dota2.Dota2ReportMode
 import top.colter.dynamic.agent.dota2.reportBusyMessage
 import top.colter.dynamic.agent.dota2.dotaCommandHelp
+import top.colter.dynamic.agent.dota2.OpenDotaApiException
 import top.colter.dynamic.agent.dota2.Dota2Service
 import top.colter.dynamic.agent.dota2.OverviewMode
 import top.colter.dynamic.agent.dota2.overviewAccount
@@ -166,6 +167,16 @@ class MessageListener(
     private suspend fun handleDotaCommand(
         cmd: String, target: TargetAddress, senderId: String, replyMsgId: String
     ) {
+        try {
+            dispatchDotaCommand(cmd, target, senderId, replyMsgId)
+        } catch (e: OpenDotaApiException) {
+            sendText(target, e.userMessage, replyMsgId)
+        }
+    }
+
+    private suspend fun dispatchDotaCommand(
+        cmd: String, target: TargetAddress, senderId: String, replyMsgId: String
+    ) {
         val parts = cmd.split(Regex("[\\s\\u3000]+")).filter { it.isNotBlank() }
 
         if (dotaQueryRequiresBinding(parts.firstOrNull()) && !hasDotaBinding(dota2Service.getBinding(senderId))) {
@@ -201,7 +212,7 @@ class MessageListener(
                         generated.analysis.notice?.let { sendText(target, it, replyMsgId) }
                     }
                 } catch (e: Exception) {
-                    if (e is CancellationException) throw e
+                    if (e is CancellationException || e is OpenDotaApiException) throw e
                     sendText(target, "个人详情生成或发送失败: ${e.message ?: "未知错误"}", replyMsgId)
                 }
             }
@@ -236,7 +247,7 @@ class MessageListener(
                         else sendText(target, "比赛 #$matchId (${if (won) "胜利" else "战败"})\n\n${generated.analysis?.rawResponse ?: "分析失败"}", replyMsgId)
                     }
                 } catch (e: Exception) {
-                    if (e is CancellationException) throw e
+                    if (e is CancellationException || e is OpenDotaApiException) throw e
                     sendText(target, "战报生成或发送失败: ${e.message ?: "未知错误"}", replyMsgId)
                 }
             }

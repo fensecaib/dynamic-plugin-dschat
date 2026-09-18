@@ -60,6 +60,8 @@
 
 **深度模式：** 将 `战报`、`个人详情` 替换成 `深度战报`、`深度个人详情` 即可开启思考，参数相同、耗时更长；普通模式关闭思考。
 
+**接口故障提示：** OpenDota 查询失败时会区分服务端故障（如 HTTP 522 回源超时）、限流、访问被拒绝、网络超时和数据格式异常，直接告知原因。正常返回的空记录或不存在的玩家仍按无数据提示；网络错误不会被误报为玩家或对局不存在。
+
 示例：`/dota 历史 176496411`、`/dota 战报 176496411 1`、`/dota 深度个人详情 176496411`。
 
 除命令外，`@Bot 文本` 也可触发对话（需在配置中开启 `trigger.enableAtTrigger`）。
@@ -82,7 +84,7 @@
 .\gradlew.bat fatJar
 ```
 
-把 `build/libs/dynamic-bot-agent-0.0.5-all.jar` 放入宿主 `plugins/` 目录，启动或重启 dynamic-bot 即可。
+把 `build/libs/dynamic-bot-agent-0.0.6-all.jar` 放入宿主 `plugins/` 目录，启动或重启 dynamic-bot 即可。
 
 > 构建前需将 `top.colter.skiko:skiko-layout:0.0.9` 安装到本地 Maven 仓库。
 
