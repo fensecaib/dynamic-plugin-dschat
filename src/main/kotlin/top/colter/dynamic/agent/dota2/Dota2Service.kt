@@ -125,39 +125,53 @@ $dota2RoastStyle
 
     // ── API calls ────────────────────────────────
 
-    suspend fun validatePlayer(accountId: Long): String? {
-        return try {
-            val resp = HttpUtils.httpGetAsync("$apiBase/players/$accountId")
-            if (resp.statusCode() !in 200..299) return null
-            val data = HttpUtils.json.decodeFromString(JsonObject.serializer(), resp.body())
-            data["profile"]?.jsonObject?.get("personaname")?.jsonPrimitive?.content
-        } catch (e: Exception) {
-            e.rethrowIfCancellation()
-            null
+    private suspend fun requestData(path: String, params: Map<String, String> = emptyMap()): JsonElement? {
+        val response = try {
+            HttpUtils.httpGetAsync("$apiBase$path", params = params)
+        } catch (e: java.io.IOException) {
+            throw openDotaNetworkFailure(e)
         }
+        if (response.statusCode() == 404) return null
+        if (response.statusCode() !in 200..299) throw openDotaHttpFailure(response.statusCode())
+        return try {
+            HttpUtils.json.parseToJsonElement(response.body()).also {
+                // 某些上游错误也可能以 HTTP 200 + JSON 错误对象返回。
+                if (it is JsonObject && it["error"]?.let { error -> error !is JsonNull } == true) invalidData()
+            }
+        } catch (e: kotlinx.serialization.SerializationException) {
+            throw OpenDotaApiException("当前 OpenDota 服务返回的数据格式异常，请稍后重试。", e)
+        }
+    }
+
+    private fun invalidData(): Nothing = throw OpenDotaApiException("当前 OpenDota 服务返回的数据格式异常，请稍后重试。")
+
+    suspend fun validatePlayer(accountId: Long): String? {
+        val data = requestData("/players/$accountId") ?: return null
+        val player = data as? JsonObject ?: invalidData()
+        val profile = player["profile"]
+        if (profile == null || profile is JsonNull) return null
+        val name = (profile as? JsonObject ?: invalidData())["personaname"]
+        if (name == null || name is JsonNull) return null
+        return (name as? JsonPrimitive)?.takeIf { it.isString }?.content ?: invalidData()
     }
 
     suspend fun getRecentMatches(accountId: Long, limit: Int = 1): JsonArray? {
-        return try {
-            val resp = HttpUtils.httpGetAsync("$apiBase/players/$accountId/recentMatches",
-                params = mapOf("limit" to limit.toString()))
-            if (resp.statusCode() !in 200..299) return null
-            orderedRecentMatches(HttpUtils.json.decodeFromString(JsonArray.serializer(), resp.body()), limit)
-        } catch (e: Exception) {
-            e.rethrowIfCancellation()
-            null
+        val data = requestData("/players/$accountId/recentMatches", mapOf("limit" to limit.toString())) ?: return null
+        val matches = data as? JsonArray ?: invalidData()
+        matches.forEach { row ->
+            val match = row as? JsonObject ?: invalidData()
+            if ((match["match_id"] as? JsonPrimitive)?.longOrNull?.takeIf { it > 0 } == null) invalidData()
+            val start = match["start_time"]
+            if (start != null && start !is JsonNull && (start as? JsonPrimitive)?.longOrNull == null) invalidData()
         }
+        return orderedRecentMatches(matches, limit)
     }
 
     suspend fun getMatchDetail(matchId: Long): JsonObject? {
-        return try {
-            val resp = HttpUtils.httpGetAsync("$apiBase/matches/$matchId")
-            if (resp.statusCode() !in 200..299) return null
-            HttpUtils.json.decodeFromString(JsonObject.serializer(), resp.body())
-        } catch (e: Exception) {
-            e.rethrowIfCancellation()
-            null
-        }
+        val data = requestData("/matches/$matchId") ?: return null
+        val match = data as? JsonObject ?: invalidData()
+        if ((match["match_id"] as? JsonPrimitive)?.longOrNull != matchId) invalidData()
+        return match
     }
 
     /**

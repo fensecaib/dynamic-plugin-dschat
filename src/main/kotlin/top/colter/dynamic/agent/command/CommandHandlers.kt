@@ -9,6 +9,7 @@ import top.colter.dynamic.agent.config.ImageConfig
 import top.colter.dynamic.agent.dota2.Dota2ReportMode
 import top.colter.dynamic.agent.dota2.reportBusyMessage
 import top.colter.dynamic.agent.dota2.dotaCommandHelp
+import top.colter.dynamic.agent.dota2.OpenDotaApiException
 import top.colter.dynamic.agent.dota2.Dota2Service
 import top.colter.dynamic.agent.dota2.OverviewMode
 import top.colter.dynamic.agent.dota2.overviewAccount
@@ -141,6 +142,12 @@ class CommandHandlers(
         override val spec = CommandSpec(path = listOf("dota"),             aliases = listOf(listOf("d2")), description = "Dota2：绑定、历史、战报（关闭思考）、深度战报（开启思考）、分析、个人详情、深度个人详情")
 
         override suspend fun handle(invocation: CommandInvocation): CommandExecutionResult {
+            return try { handleDota(invocation) } catch (e: OpenDotaApiException) {
+                fail(e.userMessage)
+            }
+        }
+
+        private suspend fun handleDota(invocation: CommandInvocation): CommandExecutionResult {
             val args = invocation.args; val sid = invocation.context.senderId
             if (dotaQueryRequiresBinding(args.firstOrNull()) && !hasDotaBinding(dota2Service.getBinding(sid))) return fail(dotaBindingRequired)
             return when {
@@ -153,7 +160,7 @@ class CommandHandlers(
                             options = top.colter.dynamic.core.plugin.PluginMessagePublishOptions(replyToMessageId = invocation.replyToMessageId.ifEmpty { null })).requireAccepted()
                         result.copy(reply = emptyList())
                     } catch (e: Exception) {
-                        if (e is CancellationException) throw e
+                        if (e is CancellationException || e is OpenDotaApiException) throw e
                         fail("个人详情生成或发送失败: ${e.message ?: "未知错误"}")
                     }
                 }
@@ -168,7 +175,7 @@ class CommandHandlers(
                             )).requireAccepted()
                         result.copy(reply = emptyList())
                     } catch (e: Exception) {
-                        if (e is CancellationException) throw e
+                        if (e is CancellationException || e is OpenDotaApiException) throw e
                         fail("战报生成或发送失败: ${e.message ?: "未知错误"}")
                     }
                 }

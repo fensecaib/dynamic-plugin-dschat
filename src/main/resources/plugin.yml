@@ -1,6 +1,6 @@
 id: dynamic-agent
 name: 多功能Agent插件
-version: 0.0.5
+version: 0.0.6
 mainClass: top.colter.dynamic.agent.DynamicAgentPlugin
 apiVersion: 3.0.0
 description: >
