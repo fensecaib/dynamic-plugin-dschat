@@ -16,6 +16,9 @@ import top.colter.dynamic.agent.dota2.generateOverview
 import top.colter.dynamic.agent.dota2.prepareDotaTargetMatch
 import top.colter.dynamic.agent.dota2.resolveDotaReportTarget
 import top.colter.dynamic.agent.dota2.dotaPlayerAccount
+import top.colter.dynamic.agent.dota2.dotaQueryRequiresBinding
+import top.colter.dynamic.agent.dota2.hasDotaBinding
+import top.colter.dynamic.agent.dota2.dotaBindingRequired
 import top.colter.dynamic.agent.dota2.historyCommandHint
 import top.colter.dynamic.agent.dota2.historyTextFallback
 import top.colter.dynamic.agent.dota2.measureDotaStage
@@ -139,6 +142,7 @@ class CommandHandlers(
 
         override suspend fun handle(invocation: CommandInvocation): CommandExecutionResult {
             val args = invocation.args; val sid = invocation.context.senderId
+            if (dotaQueryRequiresBinding(args.firstOrNull()) && !hasDotaBinding(dota2Service.getBinding(sid))) return fail(dotaBindingRequired)
             return when {
                 args.size == 2 && args[0] == "绑定" -> handleBind(args[1], sid)
                 args.size in 1..2 && args[0] == "历史" -> try { handleHistory(args, sid) } catch (e: IllegalArgumentException) { fail(e.message ?: "参数无效") }

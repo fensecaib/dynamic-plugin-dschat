@@ -7,7 +7,7 @@ import top.colter.dynamic.agent.draw.historyWon
 import kotlin.test.*
 
 class Dota2HistoryTest {
-    @Test fun `explicit player queries use selected account and preserve legacy match IDs`() = runBlocking<Unit> {
+    @Test fun `explicit player queries require binding and use explicit match ID syntax`() = runBlocking<Unit> {
         val recent=JsonArray((1L..10L).map { match(1000+it,it) })
         for(mode in Dota2ReportMode.entries) for(n in 1..10) {
             val result=resolveDotaReportTarget(listOf(mode.command,"176496411",n.toString()),999) { account ->
@@ -15,9 +15,9 @@ class Dota2HistoryTest {
             }
             assertEquals(176496411L to (1011L-n),result)
         }
-        assertEquals(176496411L to 1010L,resolveDotaReportTarget(listOf("战报","176496411","1"),null) { recent })
+        assertEquals(176496411L to 1010L,resolveDotaReportTarget(listOf("战报","176496411","1"),999) { recent })
         assertEquals(999L to 1010L,resolveDotaReportTarget(listOf("战报"),999) { assertEquals(999L,it);recent })
-        assertEquals(999L to 8980854337L,resolveDotaReportTarget(listOf("战报","8980854337"),999) { error("must not fetch") })
+        assertEquals(999L to 8980854337L,resolveDotaReportTarget(listOf("战报","比赛","8980854337"),999) { error("must not fetch") })
         assertEquals(176496411L,dotaPlayerAccount("176496411",999))
         assertTrue(historyCommandHint(10,176496411).contains("/dota 战报 176496411 N"))
         for(args in listOf(listOf("战报","176496411","0"),listOf("战报","176496411","11"),listOf("战报","abc","1"),listOf("战报","4294967296","1"),listOf("战报","176496411","1","2"))) {
@@ -44,6 +44,26 @@ class Dota2HistoryTest {
         }
         val explicit=JsonObject(raw+("players" to JsonArray(listOf(buildJsonObject { put("account_id",1);put("isRadiant",true) }))))
         assertTrue(prepareDotaTargetMatch(explicit,100,1).won)
+    }
+
+    @Test fun `v005 binding guard and default latest routes`() = runBlocking<Unit> {
+        val recent=JsonArray(listOf(match(123,1)))
+        for(mode in Dota2ReportMode.entries) {
+            assertEquals(176496411L to 123L,resolveDotaReportTarget(listOf(mode.command,"176496411"),999) { assertEquals(176496411L,it);recent })
+            assertEquals(999L to 123L,resolveDotaReportTarget(listOf(mode.command),999) { assertEquals(999L,it);recent })
+            assertEquals(999L to 1L,resolveDotaReportTarget(listOf(mode.command,"比赛","1"),999) { error("must not fetch") })
+            for(args in listOf(listOf(mode.command),listOf(mode.command,"176496411"),listOf(mode.command,"176496411","1"),listOf(mode.command,"比赛","123"))) {
+                val e=assertFailsWith<IllegalArgumentException> { resolveDotaReportTarget(args,null) { error("must not fetch") } }
+                assertEquals(dotaBindingRequired,e.message)
+            }
+            for(args in listOf(listOf(mode.command,"比赛"),listOf(mode.command,"比赛","0"),listOf(mode.command,"比赛","abc"),listOf(mode.command,"176496411","+1"))) {
+                assertFailsWith<IllegalArgumentException> { resolveDotaReportTarget(args,999) { error("must not fetch") } }
+            }
+        }
+        for(command in listOf("历史","战报","深度战报","个人详情","深度个人详情","分析")) assertTrue(dotaQueryRequiresBinding(command))
+        for(command in listOf(null,"绑定","帮助")) assertFalse(dotaQueryRequiresBinding(command))
+        assertEquals(dotaBindingRequired,assertFailsWith<IllegalArgumentException> { dotaPlayerAccount("176496411",null) }.message)
+        assertEquals(dotaBindingRequired,assertFailsWith<IllegalArgumentException> { overviewAccount(listOf("个人详情","176496411"),null) }.message)
     }
 
     private fun match(id: Long, time: Long? = null) = buildJsonObject {

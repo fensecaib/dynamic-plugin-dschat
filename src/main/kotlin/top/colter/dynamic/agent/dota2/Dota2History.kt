@@ -32,22 +32,34 @@ internal suspend fun resolveDotaReportMatchId(
         ?.takeIf { it > 0 } ?: throw IllegalArgumentException("该场缺少有效比赛ID，请使用完整比赛ID查询")
 }
 
-/** Explicit player queries do not depend on or mutate the caller's binding. */
+internal const val dotaBindingRequired = "使用 Dota 功能前需先绑定账号：/dota 绑定 <玩家ID>（指定玩家查询也需先绑定）。"
+internal fun dotaQueryRequiresBinding(command: String?) = command in setOf("历史", "战报", "深度战报", "个人详情", "深度个人详情", "分析")
+internal fun hasDotaBinding(binding: Long?) = binding != null && binding in 1..4294967295L
+
 internal fun dotaPlayerAccount(argument: String?, binding: Long?): Long {
-    if(argument==null) return requireNotNull(binding?.takeIf { it in 1..4294967295L }) { "请先绑定账号，或填写玩家ID" }
+    require(hasDotaBinding(binding)) { dotaBindingRequired }
+    if(argument==null) return requireNotNull(binding)
     return requireNotNull(argument.takeIf { it.isNotEmpty() && it.all { c -> c in '0'..'9' } }?.toLongOrNull()?.takeIf { it in 1..4294967295L }) { "请输入有效的玩家ID（1～4294967295）" }
 }
 
 internal suspend fun resolveDotaReportTarget(
     args: List<String>, binding: Long?, fetchRecent: suspend (Long) -> JsonArray?,
 ): Pair<Long,Long> {
+    val account=dotaPlayerAccount(null,binding)
     val mode=requireNotNull(Dota2ReportMode.fromCommand(args.firstOrNull())) { "未知战报指令" }
-    require(args.size in 1..3) { "用法：/dota ${mode.command} [序号或比赛ID]，或 /dota ${mode.command} 玩家ID 序号（1～10）" }
-    val explicit=args.size==3
-    val account=dotaPlayerAccount(if(explicit)args[1] else null,binding)
-    val argument=if(explicit)args[2] else args.getOrNull(1)
-    if(explicit) require(argument?.toIntOrNull() in 1..10) { "指定玩家时，比赛序号必须为1～10" }
-    return account to resolveDotaReportMatchId(argument,mode) { fetchRecent(account) }
+    val usage="用法：/dota ${mode.command} [序号]；/dota ${mode.command} <玩家ID> [序号]；/dota ${mode.command} 比赛 <比赛ID>"
+    require(args.size in 1..3) { usage }
+    if(args.getOrNull(1)=="比赛") {
+        require(args.size==3) { usage }
+        val id=requireNotNull(args[2].takeIf { it.isNotEmpty() && it.all { c -> c in '0'..'9' } }?.toLongOrNull()?.takeIf { it>0 }) { "请输入有效比赛ID" }
+        return account to id
+    }
+    if(args.size==1) return account to resolveDotaReportMatchId(null,mode) { fetchRecent(account) }
+    val value=dotaPlayerAccount(args[1],binding)
+    if(args.size==2 && value<=10) return account to resolveDotaReportMatchId(args[1],mode) { fetchRecent(account) }
+    val index=args.getOrNull(2)
+    if(index!=null) require(index.isNotEmpty() && index.all { it in '0'..'9' } && index.toIntOrNull() in 1..10) { "比赛序号必须为1～10" }
+    return value to resolveDotaReportMatchId(index,mode) { fetchRecent(value) }
 }
 
 internal fun historyCommandHint(count: Int, accountId: Long? = null): String {

@@ -70,7 +70,7 @@ class Dota2OverviewTest {
         assertTrue(normal.messages.first().content!!.contains(dota2RoastStyle))
         assertEquals("disabled",normal.thinking?.type);assertEquals("enabled",deep.thinking?.type)
         assertEquals(123L,overviewAccount(listOf("个人详情"),123))
-        assertEquals(456L,overviewAccount(listOf("深度个人详情","456"),null))
+        assertEquals(456L,overviewAccount(listOf("深度个人详情","456"),123))
         listOf(listOf("个人详情","abc"),listOf("个人详情","-1"),listOf("个人详情","9999999999999"),listOf("个人详情","123","10"),listOf("个人详情")).forEach {
             assertFailsWith<IllegalArgumentException> { overviewAccount(it,null) }
         }
@@ -140,6 +140,20 @@ class Dota2OverviewTest {
         val truncated=run(validRaw(s),validRaw(s),reason="length")
         assertTrue(truncated.sections.all { it.isFallback })
         assertNotNull(truncated.notice)
+    }
+
+    @Test fun `literal line breaks normalize and survive conclusion layout segmentation`() {
+        val escaped="第一条。\\n第二条。\\r\\n— 金句。"
+        val expected="第一条。\n第二条。\n— 金句。"
+        assertEquals(expected,normalizeOverviewText(escaped))
+        assertEquals(expected,overviewTextSegments(expected).joinToString(""))
+        assertEquals(expected,compactOverviewBody(escaped,420))
+        val long="保留段落换行。\\n".repeat(70)+"— 这是最后独立显示的金句。"
+        val compact=compactOverviewBody(long,420)
+        assertTrue(compact.length<=420)
+        assertTrue(compact.contains("\n"))
+        assertFalse(compact.contains("\\n"))
+        assertTrue(compact.endsWith("\n— 这是最后独立显示的金句。"))
     }
 
     @Test fun `pipeline bounds detail requests caches success repairs once and renders both modes`() = runBlocking<Unit> {

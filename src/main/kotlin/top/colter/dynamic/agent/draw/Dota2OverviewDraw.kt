@@ -202,7 +202,7 @@ internal fun dota2OverviewDraw(report: GeneratedOverview, config: ImageConfig, f
         // Preserve sentence order and wording, spread the conclusion across three balanced reading columns.
         val conclusion=a.body("conclusion")
         val punchline=Regex("\n— [^\n]+$").find(conclusion)?.value.orEmpty()
-        val sentences=Regex("[^。！？!?]+[。！？!?]?").findAll(conclusion.removeSuffix(punchline)).map { it.value.trim() }.toList()
+        val sentences=overviewTextSegments(conclusion.removeSuffix(punchline))
         val columnCount=sentences.size.coerceIn(1,3)
         val groupsText=MutableList(columnCount) { "" };val total=sentences.sumOf { it.length };var column=0
         sentences.forEachIndexed { i,t->if(column<columnCount-1 && groupsText[column].isNotEmpty() && (groupsText[column].length>=total/columnCount || sentences.size-i==columnCount-1-column))column++;groupsText[column]+=t }
