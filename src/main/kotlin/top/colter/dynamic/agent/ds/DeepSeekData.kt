@@ -3,6 +3,13 @@ package top.colter.dynamic.agent.ds
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
+/** Safe to show in host logs or user replies: never attach an upstream body, header, or cause. */
+class ApiCallException(
+    val category: String,
+    val statusCode: Int? = null,
+    message: String,
+) : RuntimeException(message)
+
 @Serializable
 data class ChatRequest(
     val model: String,

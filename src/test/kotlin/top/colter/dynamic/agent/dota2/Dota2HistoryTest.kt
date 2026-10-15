@@ -19,7 +19,6 @@ class Dota2HistoryTest {
         assertEquals(999L to 1010L,resolveDotaReportTarget(listOf("战报"),999) { assertEquals(999L,it);recent })
         assertEquals(999L to 8980854337L,resolveDotaReportTarget(listOf("战报","比赛","8980854337"),999) { error("must not fetch") })
         assertEquals(176496411L,dotaPlayerAccount("176496411",999))
-        assertTrue(historyCommandHint(10,176496411).contains("/dota 战报 176496411 N"))
         for(args in listOf(listOf("战报","176496411","0"),listOf("战报","176496411","11"),listOf("战报","abc","1"),listOf("战报","4294967296","1"),listOf("战报","176496411","1","2"))) {
             assertFailsWith<IllegalArgumentException> { resolveDotaReportTarget(args,999) { error("must not fetch") } }
         }

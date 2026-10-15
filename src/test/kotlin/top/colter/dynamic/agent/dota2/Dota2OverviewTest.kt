@@ -128,18 +128,17 @@ class Dota2OverviewTest {
             }
             server.start()
             try {
-                val result=analyzeOverview(s,OverviewMode.NORMAL,DeepSeekClient("test","http://127.0.0.1:${server.address.port}/chat"),"model")
-                assertEquals(2,calls.get());return result
+                val result=runCatching { analyzeOverview(s,OverviewMode.NORMAL,DeepSeekClient("test","http://127.0.0.1:${server.address.port}/chat"),"model") }
+                assertEquals(2,calls.get());return result.getOrThrow()
             } finally { server.stop(0) }
         }
         val failed=run(rawWithBad("economy"),"{}",500)
         assertEquals(listOf("economy"),failed.sections.filter { it.isFallback }.map { it.id })
-        assertNotNull(failed.notice)
+        assertTrue(assertNotNull(failed.notice).contains("部分 AI 分析暂不可用"))
         val merged=run(rawWithBad("economy"),rawWithBad("output"))
         assertNull(merged.notice);assertTrue(merged.sections.none { it.isFallback })
-        val truncated=run(validRaw(s),validRaw(s),reason="length")
-        assertTrue(truncated.sections.all { it.isFallback })
-        assertNotNull(truncated.notice)
+        val truncated=assertFailsWith<DotaAnalysisUnavailableException> { run(validRaw(s),validRaw(s),reason="length") }
+        assertEquals("response_incomplete",truncated.category)
     }
 
     @Test fun `literal line breaks normalize and survive conclusion layout segmentation`() {
@@ -195,7 +194,7 @@ class Dota2OverviewTest {
 
     @Test fun `invalid AI responses produce a visibly labelled statistics fallback`() = runBlocking<Unit> {
         val server=HttpServer.create(InetSocketAddress("127.0.0.1",0),0);val calls=AtomicInteger()
-        server.createContext("/chat") { ex -> calls.incrementAndGet();ex.requestBody.readBytes();val data="{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"role\":\"assistant\",\"content\":\"{}\"}}]}".toByteArray();ex.sendResponseHeaders(200,data.size.toLong());ex.responseBody.use { it.write(data) } }
+        server.createContext("/chat") { ex -> calls.incrementAndGet();ex.requestBody.readBytes();val data="{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"{}\"}}]}".toByteArray();ex.sendResponseHeaders(200,data.size.toLong());ex.responseBody.use { it.write(data) } }
         server.start()
         try {
             val s=fixture(1);val a=analyzeOverview(s,OverviewMode.NORMAL,DeepSeekClient("test","http://127.0.0.1:${server.address.port}/chat"),"model")

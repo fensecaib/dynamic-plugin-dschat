@@ -16,7 +16,13 @@ import top.colter.dynamic.agent.ds.ThinkingConfig
 import top.colter.dynamic.agent.util.CacheType
 import top.colter.dynamic.agent.util.CacheUtils
 import top.colter.dynamic.agent.util.HttpUtils
+import top.colter.dynamic.agent.util.AgentDiagnostics
+import top.colter.dynamic.agent.ds.ApiCallException
 import java.io.File
+import java.io.IOException
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import kotlin.coroutines.cancellation.CancellationException
 
 class Dota2Service(
@@ -82,7 +88,9 @@ $dota2RoastStyle
     }
 
     private val bindFile: File by lazy { dataDir.resolve("dota2-bindings.json") }
+    private val bindingsLock = Any()
     private val bindings = mutableMapOf<String, Long>() // senderId -> accountId
+    private var bindingsRequireBackup = false // guarded by bindingsLock
 
     private val heroNames = mutableMapOf<Int, String>()
     private val heroIconPaths = mutableMapOf<Int, String>()
@@ -100,46 +108,86 @@ $dota2RoastStyle
     private var aghsShardYes: Image? = null
     private var aghsShardNo: Image? = null
 
-    fun init() {
+    fun init() = synchronized(bindingsLock) {
         if (bindFile.exists()) {
             try {
                 val raw = HttpUtils.json.decodeFromString(JsonObject.serializer(), bindFile.readText())
-                raw.forEach { (k, v) -> bindings[k] = v.jsonPrimitive.content.toLong() }
+                // Parse into a temporary map: a bad entry must not install a partially loaded file.
+                val loaded = raw.mapValues { (_, v) -> v.jsonPrimitive.content.toLong() }
+                bindings.clear()
+                bindings.putAll(loaded)
+                bindingsRequireBackup = false
             } catch (_: Exception) {
-                bindFile.writeText("{}")
+                // Preserve the file for recovery and keep any already loaded bindings.
+                bindingsRequireBackup = true
             }
         }
     }
 
-    private fun saveBindings() {
-        val obj = buildJsonObject { bindings.forEach { (k, v) -> put(k, v) } }
-        bindFile.writeText(HttpUtils.json.encodeToString(JsonObject.serializer(), obj))
+    private fun saveBindings(values: Map<String, Long>) {
+        val obj = buildJsonObject { values.forEach { (k, v) -> put(k, v) } }
+        val destination = bindFile.toPath().toAbsolutePath()
+        Files.createDirectories(destination.parent)
+        val pending = Files.createTempFile(destination.parent, "dota2-bindings-", ".tmp")
+        try {
+            Files.writeString(pending, HttpUtils.json.encodeToString(JsonObject.serializer(), obj))
+            if (bindingsRequireBackup && Files.exists(destination)) {
+                if (!Files.isRegularFile(destination)) throw IOException("绑定数据文件无法备份，请检查宿主数据目录。")
+                val backup = Files.createTempFile(destination.parent, "dota2-bindings-corrupt-", ".json")
+                try {
+                    Files.copy(destination, backup, StandardCopyOption.REPLACE_EXISTING)
+                } catch (e: Exception) {
+                    runCatching { Files.deleteIfExists(backup) }
+                    throw e
+                }
+            }
+            try {
+                Files.move(pending, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(pending, destination, StandardCopyOption.REPLACE_EXISTING)
+            }
+        } finally {
+            Files.deleteIfExists(pending)
+        }
     }
 
-    fun getBinding(senderId: String): Long? = bindings[senderId]
+    fun getBinding(senderId: String): Long? = synchronized(bindingsLock) { bindings[senderId] }
 
-    fun setBinding(senderId: String, accountId: Long) {
+    fun setBinding(senderId: String, accountId: Long) = synchronized(bindingsLock) {
+        val updated = bindings + (senderId to accountId)
+        saveBindings(updated)
         bindings[senderId] = accountId
-        saveBindings()
+        bindingsRequireBackup = false
     }
 
     // ── API calls ────────────────────────────────
 
     private suspend fun requestData(path: String, params: Map<String, String> = emptyMap()): JsonElement? {
-        val response = try {
-            HttpUtils.httpGetAsync("$apiBase$path", params = params)
-        } catch (e: java.io.IOException) {
-            throw openDotaNetworkFailure(e)
+        val operation = when {
+            path.endsWith("/recentMatches") -> "recent_matches"
+            path.startsWith("/players/") -> "player_profile"
+            else -> "match_detail"
         }
-        if (response.statusCode() == 404) return null
-        if (response.statusCode() !in 200..299) throw openDotaHttpFailure(response.statusCode())
-        return try {
-            HttpUtils.json.parseToJsonElement(response.body()).also {
-                // 某些上游错误也可能以 HTTP 200 + JSON 错误对象返回。
-                if (it is JsonObject && it["error"]?.let { error -> error !is JsonNull } == true) invalidData()
+        return AgentDiagnostics.stage("opendota_$operation") {
+            val response = try {
+                HttpUtils.httpGetAsync("$apiBase$path", params = params)
+            } catch (e: java.io.IOException) {
+                AgentDiagnostics.event("agent_data", "failed", mapOf("operation" to operation,
+                    "category" to if (e is java.net.http.HttpTimeoutException) "network_timeout" else "network_error"), warning = true)
+                throw openDotaNetworkFailure(e)
             }
-        } catch (e: kotlinx.serialization.SerializationException) {
-            throw OpenDotaApiException("当前 OpenDota 服务返回的数据格式异常，请稍后重试。", e)
+            AgentDiagnostics.event("agent_data", if (response.statusCode() in 200..299) "received" else "failed",
+                mapOf("operation" to operation, "http_status" to response.statusCode()), warning = response.statusCode() !in 200..299)
+            if (response.statusCode() == 404) return@stage null
+            if (response.statusCode() !in 200..299) throw openDotaHttpFailure(response.statusCode())
+            try {
+                HttpUtils.json.parseToJsonElement(response.body()).also {
+                    if (it is JsonObject && it["error"]?.let { error -> error !is JsonNull } == true) invalidData()
+                }
+            } catch (e: kotlinx.serialization.SerializationException) {
+                AgentDiagnostics.event("agent_data", "failed", mapOf("operation" to operation, "category" to "response_json"), warning = true)
+                throw OpenDotaApiException("当前 OpenDota 服务返回的数据格式异常，请稍后重试。", e)
+            }
         }
     }
 
@@ -186,6 +234,8 @@ $dota2RoastStyle
             if (!heroConstantsLoaded) {
                 try {
                     val heroResp = HttpUtils.httpGetAsync("$apiBase/constants/heroes")
+                    AgentDiagnostics.event("agent_data", if (heroResp.statusCode() in 200..299) "received" else "failed",
+                        mapOf("operation" to "hero_constants", "http_status" to heroResp.statusCode()), warning = heroResp.statusCode() !in 200..299)
                     if (heroResp.statusCode() in 200..299) {
                         val heroObj = HttpUtils.json.decodeFromString(JsonObject.serializer(), heroResp.body())
                         if (heroObj.isNotEmpty()) {
@@ -201,6 +251,7 @@ $dota2RoastStyle
                     }
                 } catch (e: Exception) {
                     e.rethrowIfCancellation()
+                    AgentDiagnostics.event("agent_data", "fallback", mapOf("operation" to "hero_constants", "error_type" to e.javaClass.simpleName), warning = true)
                     // 保留已加载的数据，下次请求时仅重试尚未成功的常量类型。
                 }
             }
@@ -208,6 +259,8 @@ $dota2RoastStyle
             if (!itemConstantsLoaded) {
                 try {
                     val itemResp = HttpUtils.httpGetAsync("$apiBase/constants/items")
+                    AgentDiagnostics.event("agent_data", if (itemResp.statusCode() in 200..299) "received" else "failed",
+                        mapOf("operation" to "item_constants", "http_status" to itemResp.statusCode()), warning = itemResp.statusCode() !in 200..299)
                     if (itemResp.statusCode() in 200..299) {
                         val itemObj = HttpUtils.json.decodeFromString(JsonObject.serializer(), itemResp.body())
                         if (itemObj.isNotEmpty()) {
@@ -222,6 +275,7 @@ $dota2RoastStyle
                     }
                 } catch (e: Exception) {
                     e.rethrowIfCancellation()
+                    AgentDiagnostics.event("agent_data", "fallback", mapOf("operation" to "item_constants", "error_type" to e.javaClass.simpleName), warning = true)
                     // 英雄和物品常量独立重试，避免一个接口失败阻断另一个接口。
                 }
             }
@@ -265,21 +319,23 @@ $dota2RoastStyle
      *
      * 四项全部成功后直接复用；若只有部分资源失败，后续调用仅补齐缺失项。
      */
-    suspend fun ensureAghsIcons() {
+    suspend fun ensureAghsIcons() = ensureAghsIcons(::downloadDirect)
+
+    internal suspend fun ensureAghsIcons(download: suspend (String) -> Image?) {
         aghsIconsMutex.withLock {
             if (aghsScepterYes != null && aghsScepterNo != null && aghsShardYes != null && aghsShardNo != null) {
                 return@withLock
             }
             val base = "https://www.opendota.com/assets/images/dota2"
             coroutineScope {
-                val scepterYes = async { aghsScepterYes ?: downloadDirect("$base/scepter_1.png") }
-                val scepterNo = async { aghsScepterNo ?: downloadDirect("$base/scepter_0.png") }
-                val shardYes = async { aghsShardYes ?: downloadDirect("$base/shard_1.png") }
-                val shardNo = async { aghsShardNo ?: downloadDirect("$base/shard_0.png") }
-                aghsScepterYes = scepterYes.await()
-                aghsScepterNo = scepterNo.await()
-                aghsShardYes = shardYes.await()
-                aghsShardNo = shardNo.await()
+                // Transfer ownership inside each child. A later child may finish before an
+                // earlier download, so deferring storage until ordered awaits loses its image on cancellation.
+                listOf(
+                    async { aghsScepterYes = aghsScepterYes ?: download("$base/scepter_1.png") },
+                    async { aghsScepterNo = aghsScepterNo ?: download("$base/scepter_0.png") },
+                    async { aghsShardYes = aghsShardYes ?: download("$base/shard_1.png") },
+                    async { aghsShardNo = aghsShardNo ?: download("$base/shard_0.png") },
+                ).awaitAll()
             }
         }
     }
@@ -306,20 +362,18 @@ $dota2RoastStyle
         myAccountId: Long, matchJson: JsonObject,
         dsClient: DeepSeekClient, model: String, mode: Dota2ReportMode = Dota2ReportMode.NORMAL
     ): DsAnalysisResult? {
-        ensureConstants()
-        val players = matchJson["players"]?.jsonArray ?: return null
-        val radiantWin = matchJson["radiant_win"]?.jsonPrimitive?.boolean ?: return null
+        val players = analysisPlayers(matchJson)
+        val radiantWin = (matchJson["radiant_win"] as? JsonPrimitive)?.booleanOrNull
+            ?: throw analysisUnavailable(category = "analysis_data")
 
         val me = players.find {
-            it.jsonObject["account_id"]?.jsonPrimitive?.longOrNull == myAccountId
-        } ?: return null
-        val myTeam = if (me.jsonObject["isRadiant"]?.jsonPrimitive?.boolean == true) 0 else 1
+            (it["account_id"] as? JsonPrimitive)?.longOrNull == myAccountId
+        } ?: throw analysisUnavailable(category = "analysis_data")
+        val myTeam = analysisTeamSide(me)
         val weWon = (myTeam == 0) == radiantWin
 
-        val myTeamPlayers = players.filter {
-            val isR = it.jsonObject["isRadiant"]?.jsonPrimitive?.boolean ?: false
-            (if (isR) 0 else 1) == myTeam
-        }
+        val myTeamPlayers = players.filter { analysisTeamSide(it) == myTeam }
+        ensureConstants()
 
         val sb = StringBuilder()
         sb.appendLine("比赛结果: ${if(weWon)"我们赢了" else "我们输了"}。请输出[战犯]和[${if(weWon)"MVP" else "SVP"}]。")
@@ -355,41 +409,32 @@ $dota2RoastStyle
         val request = ChatRequest(model = model, messages = messages,
             thinking = ThinkingConfig(type = mode.thinkingType), maxTokens = 16384)
 
-        return dsClient.chat(request).fold(
-            onSuccess = { response ->
-                val content = response.choices.firstOrNull()?.message?.content ?: ""
-                parseAnalysisResult(content)
-            },
-            onFailure = { null }
-        )
+        return requestAnalysis(dsClient, request, matchJson)
     }
 
-    /**
-     * 并行分析两个阵营。结果容器始终返回，某个阵营请求失败时仅对应字段为空。
-     */
+    /** 两个阵营并行分析；任一方失败时及时取消另一方，避免发送不完整诊断。 */
     suspend fun analyzeFullMatch(
         matchJson: JsonObject, dsClient: DeepSeekClient, model: String
-    ): DualAnalyzeResult = coroutineScope {
-        // 两个阵营的数据和模型调用彼此独立，并行执行可将全场分析等待时间
-        // 从两次请求耗时之和降为较慢一次请求的耗时。
-        val radiantResult = async { analyzeTeamSide(0, matchJson, dsClient, model) }
-        val direResult = async { analyzeTeamSide(1, matchJson, dsClient, model) }
-        DualAnalyzeResult(radiantResult.await(), direResult.await())
+    ): DualAnalyzeResult = withDotaAnalysisBudget {
+        coroutineScope {
+            val radiantResult = async { analyzeTeamSide(0, matchJson, dsClient, model) }
+            val direResult = async { analyzeTeamSide(1, matchJson, dsClient, model) }
+            DualAnalyzeResult(radiantResult.await(), direResult.await())
+        }
     }
 
     private suspend fun analyzeTeamSide(
         side: Int, matchJson: JsonObject,
         dsClient: DeepSeekClient, model: String
     ): DsAnalysisResult? {
-        ensureConstants()
-        val players = matchJson["players"]?.jsonArray ?: return null
-        val radiantWin = matchJson["radiant_win"]?.jsonPrimitive?.boolean ?: return null
+        val players = analysisPlayers(matchJson)
+        val radiantWin = (matchJson["radiant_win"] as? JsonPrimitive)?.booleanOrNull
+            ?: throw analysisUnavailable(category = "analysis_data")
         val weWon = (side == 0) == radiantWin
 
-        val sidePlayers = players.filter {
-            val isR = it.jsonObject["isRadiant"]?.jsonPrimitive?.boolean ?: false
-            (if (isR) 0 else 1) == side
-        }
+        val sidePlayers = players.filter { analysisTeamSide(it) == side }
+        if (sidePlayers.isEmpty()) throw analysisUnavailable(category = "analysis_data")
+        ensureConstants()
 
         val sb = StringBuilder()
         val sideName = if (side == 0) "天辉" else "夜魇"
@@ -426,13 +471,43 @@ $dota2RoastStyle
         val request = ChatRequest(model = model, messages = messages,
             thinking = ThinkingConfig(type = "enabled"), maxTokens = 16384)
 
-        return dsClient.chat(request).fold(
-            onSuccess = { response ->
-                val content = response.choices.firstOrNull()?.message?.content ?: ""
-                parseAnalysisResult(content)
-            },
-            onFailure = { null }
-        )
+        return requestAnalysis(dsClient, request, matchJson, side)
+    }
+
+    private fun analysisPlayers(matchJson: JsonObject): List<JsonObject> =
+        (matchJson["players"] as? JsonArray)?.takeIf { it.isNotEmpty() }?.map {
+            it as? JsonObject ?: throw analysisUnavailable(category = "analysis_data")
+        } ?: throw analysisUnavailable(category = "analysis_data")
+
+    private fun analysisTeamSide(player: JsonObject): Int {
+        val explicit = (player["isRadiant"] as? JsonPrimitive)?.booleanOrNull
+        val slot = (player["player_slot"] as? JsonPrimitive)?.intOrNull
+        val fromSlot = when (slot) {
+            in 0..4 -> true
+            in 128..132 -> false
+            else -> null
+        }
+        if (explicit != null && fromSlot != null && explicit != fromSlot) {
+            throw analysisUnavailable(category = "analysis_data")
+        }
+        val radiant = explicit ?: fromSlot ?: throw analysisUnavailable(category = "analysis_data")
+        return if (radiant) 0 else 1
+    }
+
+    private suspend fun requestAnalysis(
+        client: DeepSeekClient, request: ChatRequest, matchJson: JsonObject, side: Int? = null,
+    ): DsAnalysisResult {
+        val result = client.chat(request)
+        val failure = result.exceptionOrNull()
+        val analysis = result.getOrNull()?.choices?.firstOrNull()?.message?.content?.let(::parseAnalysisResult)
+        if (analysis != null) return analysis
+        val unavailable = analysisUnavailable(failure)
+        AgentDiagnostics.event("agent_analysis", "unavailable", mapOf(
+            "match_id" to (matchJson["match_id"] as? JsonPrimitive)?.longOrNull,
+            "side" to side, "category" to unavailable.category,
+            "http_status" to (failure as? ApiCallException)?.statusCode,
+        ), warning = true)
+        throw unavailable
     }
 
     private fun parseAnalysisResult(content: String): DsAnalysisResult? {
@@ -510,17 +585,50 @@ $dota2RoastStyle
         var resources: Dota2ReportAssets? = null
         var transferred = false
         try {
-            return measureDotaStage(matchId, "analysis_and_resources", mode) {
-                // 常量先准备好，保证原来的英雄名称及模型输入不因资源并发而发生变化。
-                measureDotaStage(matchId, "constants", mode) { ensureConstants() }
-                coroutineScope {
-                    val pendingAssets = async {
-                        measureDotaStage(matchId, "assets", mode) { prepareReportAssets(matchJson) }.also { resources = it }
+            return withDotaAnalysisBudget {
+                measureDotaStage(matchId, "analysis_and_resources", mode) {
+                    // 常量先准备好，保证原来的英雄名称及模型输入不因资源并发而发生变化。
+                    measureDotaStage(matchId, "constants", mode) { ensureConstants() }
+                    coroutineScope {
+                        val pendingAssets = async {
+                            measureDotaStage(matchId, "assets", mode) {
+                                prepareReportAssets(matchJson).also { resources = it }
+                            }
+                        }
+                        val analysis = measureDotaStage(matchId, "ai", mode) { analyzeMatch(myAccountId, matchJson, dsClient, model, mode) }
+                        val assets = pendingAssets.await()
+                        val report = measureDotaStage(matchId, "assemble", mode) { buildReport(matchJson, myAccountId, analysis, won, assets) }
+                        GeneratedDota2Report(analysis, report, assets)
                     }
-                    val analysis = measureDotaStage(matchId, "ai", mode) { analyzeMatch(myAccountId, matchJson, dsClient, model, mode) }
-                    val assets = pendingAssets.await()
-                    val report = measureDotaStage(matchId, "assemble", mode) { buildReport(matchJson, myAccountId, analysis, won, assets) }
-                    GeneratedDota2Report(analysis, report, assets)
+                }
+            }.also { transferred = true }
+        } finally {
+            if (!transferred) resources?.close()
+        }
+    }
+
+    /** 全场分析与普通战报共用资源所有权，取消或绘图完成时均释放每份报告的图片。 */
+    internal suspend fun generateFullReport(
+        matchJson: JsonObject, dsClient: DeepSeekClient, model: String,
+    ): GeneratedDota2Report {
+        val matchId = (matchJson["match_id"] as? JsonPrimitive)?.longOrNull ?: 0
+        var resources: Dota2ReportAssets? = null
+        var transferred = false
+        try {
+            return withDotaAnalysisBudget {
+                measureDotaStage(matchId, "full_analysis_and_resources") {
+                    measureDotaStage(matchId, "constants") { ensureConstants() }
+                    coroutineScope {
+                        val pendingAssets = async {
+                            measureDotaStage(matchId, "assets") {
+                                prepareReportAssets(matchJson).also { resources = it }
+                            }
+                        }
+                        val analysis = measureDotaStage(matchId, "full_ai") { analyzeFullMatch(matchJson, dsClient, model) }
+                        val assets = pendingAssets.await()
+                        val report = measureDotaStage(matchId, "assemble") { buildFullReport(matchJson, analysis, assets) }
+                        GeneratedDota2Report(null, report, assets)
+                    }
                 }
             }.also { transferred = true }
         } finally {
@@ -592,13 +700,18 @@ $dota2RoastStyle
         )
     }
 
-    suspend fun buildFullReport(matchJson: JsonObject, dual: DualAnalyzeResult?): Dota2MatchReport {
-        ensureConstants(); ensureAghsIcons()
+    suspend fun buildFullReport(matchJson: JsonObject, dual: DualAnalyzeResult?): Dota2MatchReport =
+        buildFullReport(matchJson, dual, null)
+
+    private suspend fun buildFullReport(
+        matchJson: JsonObject, dual: DualAnalyzeResult?, assets: Dota2ReportAssets?,
+    ): Dota2MatchReport {
+        if (assets == null) { ensureConstants(); ensureAghsIcons() }
         val players = matchJson["players"]?.jsonArray ?: JsonArray(emptyList())
         val radiantWin = matchJson["radiant_win"]?.jsonPrimitive?.boolean ?: false
         val r = dual?.radiant; val d = dual?.dire
 
-        val cards = players.map { buildPlayerCard(it.jsonObject, false, null) }
+        val cards = players.map { buildPlayerCard(it.jsonObject, false, null, assets) }
         val radiantCards = cards.filter { it.isRadiant }
         val direCards = cards.filter { !it.isRadiant }
         val radiantMvpCard = findAnalysisCard(radiantCards, r?.mvpOrSvp)
@@ -634,7 +747,7 @@ $dota2RoastStyle
         val itemIds = (0..5).map { obj["item_$it"]?.jsonPrimitive?.intOrNull ?: 0 }
         val bpIds = (0..2).map { obj["backpack_$it"]?.jsonPrimitive?.intOrNull ?: 0 }
         val neutralIds = listOf(obj["item_neutral"]?.jsonPrimitive?.intOrNull ?: 0)
-        val isRadiant = obj["isRadiant"]?.jsonPrimitive?.boolean ?: true
+        val isRadiant = analysisTeamSide(obj) == 0
         suspend fun item(id: Int): Image? = if (assets == null) loadItemIcon(id) else assets.items[id]
 
         return Dota2PlayerCard(
@@ -699,8 +812,8 @@ $dota2RoastStyle
     }
 
     private fun gameModeName(mode: Int): String = when (mode) {
-        22 -> "全英雄选择"; 2 -> "队长模式"; 3 -> "随机征召"; 4 -> "个别征召"
-        5 -> "全阵营随机"; 16 -> "队长征召"; 1 -> "加速模式"; 23 -> "技能征召"
+        1, 22 -> "全英雄选择"; 2 -> "队长模式"; 3 -> "随机征召"; 4 -> "个别征召"
+        5 -> "全阵营随机"; 16 -> "队长征召"; 18 -> "技能征召"; 23 -> "加速模式"
         else -> "模式$mode"
     }
 

@@ -3,6 +3,7 @@ package top.colter.dynamic.agent.dota2
 import kotlinx.serialization.json.*
 import top.colter.dynamic.agent.ds.*
 import top.colter.dynamic.agent.util.HttpUtils
+import top.colter.dynamic.agent.util.AgentDiagnostics
 import kotlin.coroutines.cancellation.CancellationException
 
 internal val overviewDimensions = linkedMapOf("economy" to "经济与成长", "output" to "输出与推进", "survival" to "死亡与参与", "heroes" to "英雄与稳定性")
@@ -146,12 +147,26 @@ internal suspend fun analyzeOverview(snapshot: OverviewSnapshot, mode: OverviewM
     var request = initial
     var lastRaw: String? = null
     var lastError: String? = null
+    var requestFailure: DotaAnalysisUnavailableException? = null
     val accepted = linkedMapOf<String, OverviewSection>()
     for (attempt in 0..1) {
-        val choice = client.chat(request, retries = 0).getOrNull()?.choices?.firstOrNull()
+        val response = client.chat(request, retries = 0)
+        val choice = response.getOrNull()?.choices?.firstOrNull()
         val raw = choice?.message?.content
         if (raw == null) {
-            lastError = "AI 请求失败"
+            val error = response.exceptionOrNull()
+            val unavailable = analysisUnavailable(error)
+            lastError = unavailable.userMessage
+            AgentDiagnostics.event("agent_analysis", if (accepted.isEmpty()) "unavailable" else "partial", mapOf(
+                "category" to unavailable.category,
+                "http_status" to (error as? ApiCallException)?.statusCode, "attempt" to attempt + 1), warning = true)
+            if (attempt == 0 && (error as? ApiCallException)?.category == "response_incomplete") {
+                // Retry the structured task once without accepting or replaying a truncated answer.
+                request = initial.copy(messages = initial.messages + ChatMessage("user", "上次输出未完整结束。请缩短表达，在输出上限内完整返回所需的 sections JSON，保留固定章节及事实依据。"))
+                continue
+            }
+            if (accepted.isEmpty()) throw unavailable
+            requestFailure = unavailable
             break
         }
         lastRaw = raw
@@ -167,12 +182,17 @@ internal suspend fun analyzeOverview(snapshot: OverviewSnapshot, mode: OverviewM
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             lastError = e.message
+            AgentDiagnostics.event("agent_analysis", "validation_failed", mapOf("attempt" to attempt + 1, "error_type" to e.javaClass.simpleName), warning = true)
         }
         if (attempt == 0) request = initial.copy(messages = initial.messages + ChatMessage("assistant", raw.take(16000)) +
             ChatMessage("user", "输出校验未通过：${lastError?.take(1000)}。请重新返回全部sections，遵循固定ID和篇幅；只少量引用输入中原有的数值和单位，不创造倍数、阈值或评分。只使用事实支持的判断，不编造过程。修正事实不等于收起嘴：完整保留上方共享战报Style Rules的狠劲、递进吐槽、贴合数据的新梗，以及每段末尾换行的‘— ’收尾，不要改成温吞的数据摘要。"))
     }
-    val fallback = overviewFallback(snapshot, if (accepted.isEmpty()) "AI 分析未完成，以下为数据摘要，可稍后重试"
-        else "部分 AI 段落未完成或未通过检查，已保留可用分析，其余替换为数据摘要")
+    val notice = when {
+        requestFailure != null -> "部分 ${requestFailure.userMessage.removePrefix("当前 ")} 已保留可用分析，其余替换为数据摘要。"
+        accepted.isEmpty() -> "AI 分析暂不可用：模型结果未通过格式或数据校验，以下仅提供数据摘要，可稍后重试。"
+        else -> "部分 AI 分析未完成或未通过检查，已保留可用分析，其余替换为数据摘要。"
+    }
+    val fallback = overviewFallback(snapshot, notice)
     return fallback.copy(sections = fallback.sections.map { section ->
         accepted[section.id] ?: section.copy(body = "【数据摘要】" + section.body)
     }, rawResponse = lastRaw, validationError = lastError)

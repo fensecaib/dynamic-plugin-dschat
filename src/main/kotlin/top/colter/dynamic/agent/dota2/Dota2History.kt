@@ -32,7 +32,7 @@ internal suspend fun resolveDotaReportMatchId(
         ?.takeIf { it > 0 } ?: throw IllegalArgumentException("该场缺少有效比赛ID，请使用完整比赛ID查询")
 }
 
-internal const val dotaBindingRequired = "使用 Dota 功能前需先绑定账号：/dota 绑定 <玩家ID>（指定玩家查询也需先绑定）。"
+internal const val dotaBindingRequired = "使用 Dota 功能前需先绑定账号：/dota绑定 <玩家ID>（原 /dota 绑定 仍可用，指定玩家查询也需先绑定）。"
 internal fun dotaQueryRequiresBinding(command: String?) = command in setOf("历史", "战报", "深度战报", "个人详情", "深度个人详情", "分析")
 internal fun hasDotaBinding(binding: Long?) = binding != null && binding in 1..4294967295L
 
@@ -60,11 +60,6 @@ internal suspend fun resolveDotaReportTarget(
     val index=args.getOrNull(2)
     if(index!=null) require(index.isNotEmpty() && index.all { it in '0'..'9' } && index.toIntOrNull() in 1..10) { "比赛序号必须为1～10" }
     return value to resolveDotaReportMatchId(index,mode) { fetchRecent(value) }
-}
-
-internal fun historyCommandHint(count: Int, accountId: Long? = null): String {
-    val prefix=accountId?.let { "$it " }.orEmpty()
-    return "查战报：/dota 战报 ${prefix}N（N=1～$count，1为最新，随新对局顺延）。开启思考用“深度战报”。"
 }
 
 internal fun historyTextFallback(matches: JsonArray): String = matches.mapIndexed { i, match ->

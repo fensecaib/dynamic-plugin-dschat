@@ -25,5 +25,10 @@ internal val dotaCommandHelp = """
     /dota 个人详情 [玩家ID]：最近10场分析
     /dota 分析 <比赛ID>：双阵营分析
     战报、个人详情加“深度”前缀可开启思考，耗时更长。
+    QQBot 快捷入口（参数放在指令名后）：
+    /dota绑定 <玩家ID>；/dota历史 [玩家ID]
+    /dota战报 [玩家ID] [序号]；/dota深报 [玩家ID] [序号]
+    /dota详情 [玩家ID]；/dota深详 [玩家ID]
+    /dota分析 <比赛ID>；/dota帮助
     查询前需先绑定；不填玩家用绑定账号，不填序号查最新。序号1～10；单参数>10按玩家ID。
 """.trimIndent()

@@ -1,5 +1,6 @@
 package top.colter.dynamic.agent.agent
 
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.*
 import top.colter.dynamic.agent.util.HttpUtils
@@ -29,17 +30,17 @@ object SearchClient {
         try {
             val result = searchExa(query)
             if (result.isNotBlank()) return result
-        } catch (_: Exception) {}
+        } catch (e: Exception) { if (e is CancellationException) throw e }
 
         try {
             val result = searchParallel(query)
             if (result.isNotBlank()) return result
-        } catch (_: Exception) {}
+        } catch (e: Exception) { if (e is CancellationException) throw e }
 
         try {
             val result = searchDdgJson(query)
             if (result.isNotBlank()) return result
-        } catch (_: Exception) {}
+        } catch (e: Exception) { if (e is CancellationException) throw e }
 
         return "所有搜索后端均失败"
     }
@@ -55,7 +56,7 @@ object SearchClient {
         val body = HttpUtils.json.encodeToString(McpRequest.serializer(),
             McpRequest(method = "tools/call", params = McpParams("web_search_exa", args)))
 
-        val resp = HttpUtils.httpPost(EXA_URL, body,
+        val resp = HttpUtils.httpPostAsync(EXA_URL, body,
             headers = mapOf("Accept" to "application/json, text/event-stream"),
             timeoutSec = 30, client = client)
         require(resp.statusCode() in 200..299) { "HTTP ${resp.statusCode()}" }
@@ -70,7 +71,7 @@ object SearchClient {
         val body = HttpUtils.json.encodeToString(McpRequest.serializer(),
             McpRequest(method = "tools/call", params = McpParams("web_search", args)))
 
-        val resp = HttpUtils.httpPost(PARALLEL_URL, body,
+        val resp = HttpUtils.httpPostAsync(PARALLEL_URL, body,
             headers = mapOf(
                 "Accept" to "application/json, text/event-stream",
                 "User-Agent" to "opencode"
@@ -81,7 +82,7 @@ object SearchClient {
     }
 
     private suspend fun searchDdgJson(query: String): String {
-        val resp = HttpUtils.httpGet(DDG_URL,
+        val resp = HttpUtils.httpGetAsync(DDG_URL,
             params = mapOf(
                 "q" to query, "format" to "json",
                 "no_html" to "1", "skip_disambig" to "1"
@@ -105,7 +106,7 @@ object SearchClient {
             try {
                 val data = HttpUtils.json.decodeFromString(JsonObject.serializer(), line.substring(6))
                 sb.append(extractTextContent(data))
-            } catch (_: Exception) {}
+            } catch (e: Exception) { if (e is CancellationException) throw e }
         }
         return sb.toString().trim()
     }

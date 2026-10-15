@@ -6,7 +6,7 @@ plugins {
 apply(from = "gradle/dynamic-plugin-fatjar.gradle.kts")
 
 group = "top.colter.dynamic"
-version = "0.0.6"
+version = "0.0.7"
 
 repositories {
     mavenLocal()
@@ -30,6 +30,9 @@ dependencies {
     compileOnly("top.colter.skiko:skiko-layout:0.0.9")
 
     // 打包进 plugin fatJar
+    implementation("org.commonmark:commonmark:0.30.0")
+    implementation("org.commonmark:commonmark-ext-gfm-tables:0.30.0")
+    implementation("org.commonmark:commonmark-ext-gfm-strikethrough:0.30.0")
     implementation("org.jsoup:jsoup:1.18.1")
     implementation("com.google.zxing:core:3.5.4")
     implementation("com.google.zxing:javase:3.5.4")

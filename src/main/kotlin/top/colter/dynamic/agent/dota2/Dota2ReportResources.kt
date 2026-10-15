@@ -1,7 +1,7 @@
 package top.colter.dynamic.agent.dota2
 
-import io.github.oshai.kotlinlogging.KotlinLogging
 import org.jetbrains.skia.Image
+import top.colter.dynamic.agent.util.AgentDiagnostics
 
 internal class Dota2ReportAssets(val heroes: Map<Int, Image?>, val items: Map<Int, Image?>, val avatar: Image? = null) : AutoCloseable {
     override fun close() { (heroes.values + items.values + avatar).filterNotNull().forEach { it.close() } }
@@ -13,14 +13,10 @@ internal class GeneratedDota2Report(
     override fun close() = assets.close()
 }
 
-private val reportLogger = KotlinLogging.logger("Dota2ReportTiming")
-
 /** 仅输出阶段、比赛 ID 和耗时，不记录提示词、密钥或模型回复。并行阶段耗时不可直接相加。 */
 internal suspend fun <T> measureDotaStage(matchId: Long, stage: String, mode: Dota2ReportMode? = null, block: suspend () -> T): T {
-    val start = System.nanoTime()
-    var completed = false
-    try { return block().also { completed = true } } finally {
-        val ms = (System.nanoTime() - start) / 1_000_000
-        reportLogger.info { "dota_report match=$matchId stage=$stage elapsed_ms=$ms completed=$completed${mode?.let { " mode=${it.name.lowercase()} thinking=${it.thinkingType}" } ?: ""}" }
-    }
+    val idField = if (stage.startsWith("overview")) "player_id" else "match_id"
+    val fields = mapOf<String, Any?>(idField to matchId, "component" to "dota_report") +
+        (mode?.let { mapOf("mode" to it.name.lowercase(), "thinking" to it.thinkingType) } ?: emptyMap())
+    return AgentDiagnostics.stage(stage, fields, block)
 }

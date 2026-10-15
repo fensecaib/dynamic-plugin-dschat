@@ -1,5 +1,7 @@
 package top.colter.dynamic.agent.agent
 
+import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import top.colter.dynamic.agent.config.WebSearchConfig
@@ -13,6 +15,8 @@ class SearchAgent(config: WebSearchConfig) : Agent {
     override val name = "search"
     override val maxRounds = config.maxRounds
 
+    private val searchTimeout = config.searchTimeout.coerceIn(1, 60) * 1000L
+    private val fetchTimeout = config.fetchTimeout.coerceIn(1, 60) * 1000L
     private val fetchMaxChars = config.fetchMaxChars
 
     override val tools: List<Tool> = listOf(
@@ -79,7 +83,7 @@ class SearchAgent(config: WebSearchConfig) : Agent {
         |规则:
         |- **策略** → 精准查询。中英文混合。关键词："2026"、SOTA。
         |- **日期/时间** → 先调 current_time，禁止猜测。
-        |- **不确定的事实** → web_search 验证，至少两次不同角度查询交叉确认。
+        |- **不确定的事实** → web_search 验证，按需查询，资料足够即回答，避免重复搜索。
         |- **语言权重** → 强制混合中英文搜索以打破信息孤岛。官方文档/Stack Overflow采用英文；本地化/社区方案采用中文。
         |- **搜到版本号/Hash/下载链** → 必须 web_fetch 官方页面确认，不以聚合站/论坛为准。
         |- **时间锚点** → 关键词必须包含"2026"或"最新"。拒绝过时模式。
@@ -107,18 +111,19 @@ class SearchAgent(config: WebSearchConfig) : Agent {
                 "web_search" -> {
                     val query = parseArg(arguments, "query")
                         ?: return "错误: 缺少搜索关键词"
-                    val result = SearchClient.search(query)
+                    val result = withTimeoutOrNull(searchTimeout) { SearchClient.search(query) } ?: "搜索超时，请根据已有资料收尾，不要重复相同查询。"
                     "===网络搜索===\n$result"
                 }
                 "web_fetch" -> {
                     val url = parseArg(arguments, "url")
                         ?: return "错误: 缺少URL"
-                    val result = FetchService.fetch(url, fetchMaxChars)
+                    val result = withTimeoutOrNull(fetchTimeout) { FetchService.fetch(url, fetchMaxChars) } ?: "网页抓取超时，请根据已有资料收尾。"
                     "===网页内容=== [来源: $url]\n$result"
                 }
                 else -> "未知工具: $toolName"
             }
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             "执行 $toolName 失败: ${e.message}"
         }
     }

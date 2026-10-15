@@ -10,7 +10,7 @@ object FetchService {
 
     suspend fun fetch(url: String, maxChars: Int = 8000): String {
         return try {
-            val resp = HttpUtils.httpGet(url,
+            val resp = HttpUtils.httpGetAsync(url,
                 headers = mapOf("User-Agent" to
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
                     "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"),
@@ -74,7 +74,7 @@ object FetchService {
                 put("chunks_per_source", 5)
                 put("timeout", 60)
             })
-            val resp = HttpUtils.httpPost(
+            val resp = HttpUtils.httpPostAsync(
                 "https://api.tavily.com/extract", body,
                 headers = mapOf("Authorization" to "Bearer $apiKey"),
                 timeoutSec = 90, client = tavilyClient

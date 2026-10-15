@@ -3,20 +3,33 @@ package top.colter.dynamic.agent.util
 import kotlinx.serialization.json.Json
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.net.http.HttpTimeoutException
 import java.time.Duration
+import kotlin.time.Duration.Companion.seconds
 
 object HttpUtils {
-    /** 阻塞式 HttpClient.send 在 IO 线程执行，并在协程取消时中断请求。 */
-    suspend fun httpGetAsync(url: String, headers: Map<String, String> = emptyMap(), params: Map<String, String> = emptyMap()): HttpResponse<String> =
-        runInterruptible(Dispatchers.IO) { httpGet(url, headers, params) }
+    /** Bound the complete body as well as headers; JDK request timeout alone only covers headers. */
+    suspend fun httpGetAsync(url: String, headers: Map<String, String> = emptyMap(), params: Map<String, String> = emptyMap(), timeoutSec: Long = 30, client: HttpClient = defaultClient): HttpResponse<String> =
+        withHttpTimeout(timeoutSec) { httpGet(url, headers, params, timeoutSec, client) }
 
-    suspend fun httpGetBytesAsync(url: String): HttpResponse<ByteArray> =
-        runInterruptible(Dispatchers.IO) { httpGetBytes(url) }
+    suspend fun httpGetBytesAsync(url: String, timeoutSec: Long = 30, client: HttpClient = defaultClient): HttpResponse<ByteArray> =
+        withHttpTimeout(timeoutSec) { httpGetBytes(url, timeoutSec, client) }
+
+    suspend fun httpPostAsync(url: String, body: String, headers: Map<String, String> = emptyMap(), timeoutSec: Long = 30, client: HttpClient = defaultClient): HttpResponse<String> =
+        withHttpTimeout(timeoutSec) { httpPost(url, body, headers, timeoutSec, client) }
+
+    private suspend fun <T : Any> withHttpTimeout(timeoutSec: Long, block: () -> T): T {
+        require(timeoutSec > 0) { "HTTP timeout must be positive" }
+        return withTimeoutOrNull(timeoutSec.seconds) {
+            runInterruptible(Dispatchers.IO) { block() }
+        } ?: throw HttpTimeoutException("HTTP response deadline exceeded")
+    }
 
     val json: Json = Json {
         ignoreUnknownKeys = true

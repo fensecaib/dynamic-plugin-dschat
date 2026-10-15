@@ -84,7 +84,7 @@
 .\gradlew.bat fatJar
 ```
 
-把 `build/libs/dynamic-bot-agent-0.0.6-all.jar` 放入宿主 `plugins/` 目录，启动或重启 dynamic-bot 即可。
+把 `build/libs/dynamic-bot-agent-0.0.7-all.jar` 放入宿主 `plugins/` 目录，启动或重启 dynamic-bot 即可。
 
 > 构建前需将 `top.colter.skiko:skiko-layout:0.0.9` 安装到本地 Maven 仓库。
 

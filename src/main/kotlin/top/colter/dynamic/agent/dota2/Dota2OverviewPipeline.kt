@@ -3,6 +3,7 @@ package top.colter.dynamic.agent.dota2
 import kotlinx.coroutines.*
 import org.jetbrains.skia.Image
 import top.colter.dynamic.agent.ds.DeepSeekClient
+import top.colter.dynamic.agent.util.AgentDiagnostics
 import kotlin.coroutines.cancellation.CancellationException
 
 internal class GeneratedOverview(val snapshot: OverviewSnapshot, val analysis: OverviewAnalysis, val mode: OverviewMode, val assets: Dota2ReportAssets) : AutoCloseable {
@@ -20,19 +21,26 @@ private suspend fun Dota2Service.overviewAssets(snapshot: OverviewSnapshot): Dot
     } catch (e: Exception) {
         (heroes.values + items.values + avatar).filterNotNull().forEach { it.close() }
         if (e is CancellationException) throw e
+        AgentDiagnostics.event("agent_assets", "fallback", mapOf("error_type" to e.javaClass.simpleName), warning = true)
         return Dota2ReportAssets(emptyMap(), emptyMap())
     }
 }
 internal suspend fun Dota2Service.generateOverview(accountId: Long, mode: OverviewMode, client: DeepSeekClient, model: String): GeneratedOverview {
-    val reportMode = if (mode == OverviewMode.DEEP) Dota2ReportMode.DEEP else Dota2ReportMode.NORMAL
-    val snapshot = measureDotaStage(accountId, "overview_snapshot", reportMode) { getOverviewSnapshot(accountId) }
     var assets: Dota2ReportAssets? = null
     var transferred = false
     try {
-        return coroutineScope {
-            val pendingAssets = async { overviewAssets(snapshot).also { assets = it } }
-            val analysis = measureDotaStage(accountId, "overview_ai", reportMode) { analyzeOverview(snapshot, mode, client, model) }
-            GeneratedOverview(snapshot, analysis, mode, pendingAssets.await())
+        return withDotaAnalysisBudget {
+            val reportMode = if (mode == OverviewMode.DEEP) Dota2ReportMode.DEEP else Dota2ReportMode.NORMAL
+            val snapshot = measureDotaStage(accountId, "overview_snapshot", reportMode) { getOverviewSnapshot(accountId) }
+            coroutineScope {
+                val pendingAssets = async {
+                    measureDotaStage(accountId, "overview_assets", reportMode) {
+                        overviewAssets(snapshot).also { assets = it }
+                    }
+                }
+                val analysis = measureDotaStage(accountId, "overview_ai", reportMode) { analyzeOverview(snapshot, mode, client, model) }
+                GeneratedOverview(snapshot, analysis, mode, pendingAssets.await())
+            }
         }.also { transferred = true }
     } finally { if (!transferred) assets?.close() }
 }

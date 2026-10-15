@@ -1,8 +1,5 @@
 package top.colter.dynamic.agent.chat
 
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import org.jetbrains.skia.Image
 import top.colter.dynamic.agent.agent.Agent
 import top.colter.dynamic.agent.agent.AgentRouter
 import top.colter.dynamic.agent.agent.FetchService
@@ -19,7 +16,6 @@ class ChatService(
 
     data class ChatResult(
         val content: String,
-        val isLong: Boolean,
     )
 
     data class ChatOptions(
@@ -43,6 +39,8 @@ class ChatService(
         val client = resolved.client
         val model = resolved.model
         val systemPrompt = resolved.systemPrompt
+        // Capture this conversation before fetching URLs or waiting on the model.
+        val turn = sessionManager.beginTurn(sessionKey, prompt, systemPrompt)
 
         val detectedUrls = urlPattern.matcher(prompt).let { matcher ->
             val urls = mutableListOf<String>()
@@ -50,10 +48,15 @@ class ChatService(
             urls
         }
 
+        val budget = SearchBudget(config.webSearch.totalTimeoutSeconds.coerceIn(10, 300) * 1000L)
         val fetchedContents = mutableListOf<String>()
         val failedUrls = mutableListOf<String>()
-        if (detectedUrls.isNotEmpty()) {
-            val results = FetchService.fetchBatchViaTavily(detectedUrls, config.webSearch.tavilyApiKey)
+        if (resolved.enableWebSearch && detectedUrls.isNotEmpty()) {
+            val results = budget.run {
+                kotlinx.coroutines.withTimeoutOrNull(config.webSearch.fetchTimeout.coerceIn(1, 60) * 1000L) {
+                    FetchService.fetchBatchViaTavily(detectedUrls, config.webSearch.tavilyApiKey)
+                } ?: detectedUrls.map { FetchService.TavilyResult(it, false) }
+            } ?: detectedUrls.map { FetchService.TavilyResult(it, false) }
             for (r in results) {
                 if (r.success) fetchedContents.add("===页面内容: ${r.url}===\n${r.content}")
                 else failedUrls.add(r.url)
@@ -75,7 +78,8 @@ class ChatService(
             sb.toString()
         } else prompt
 
-        val messages = sessionManager.buildMessages(sessionKey, augmentedPrompt, systemPrompt)
+        val messages = turn.messages
+        messages[messages.lastIndex] = ChatMessage("user", augmentedPrompt)
 
         val agent: Agent = if (resolved.enableWebSearch) {
             AgentRouter.create(config)
@@ -84,82 +88,15 @@ class ChatService(
         }
         agent.prepareMessages(messages, augmentedPrompt, systemPrompt)
 
-        var round = 0
-        var finalContent: String? = null
-
-        if (!agent.shouldContinue(0)) {
-            val request = ChatRequest(
-                model = model,
-                messages = messages.toList(),
-                maxTokens = config.chat.maxTokens,
-            )
-            val result = client.chat(request)
-            finalContent = result.fold(
-                onSuccess = { it.choices.firstOrNull()?.message?.content ?: "(空回复)" },
-                onFailure = { "请求失败: ${it.message ?: "未知错误"}" }
-            )
-        }
-
-        while (agent.shouldContinue(round)) {
-            val request = ChatRequest(
-                model = model,
-                messages = messages.toList(),
-                maxTokens = config.chat.maxTokens,
-                tools = agent.tools.takeIf { it.isNotEmpty() },
-                toolChoice = if (agent.tools.isNotEmpty()) "auto" else null,
-            )
-
-            val result = client.chat(request)
-
-            result.fold(
-                onSuccess = { response ->
-                    val choice = response.choices.firstOrNull()
-                    val replyMsg = choice?.message
-
-                    if (replyMsg?.toolCalls?.isNotEmpty() == true) {
-                        messages.add(replyMsg)
-
-                        for (call in replyMsg.toolCalls) {
-                            val toolResult = agent.executeTool(
-                                call.function.name,
-                                call.function.arguments,
-                                call.id
-                            ) ?: "工具执行返回空结果"
-
-                            messages.add(ChatMessage(
-                                role = "tool",
-                                content = toolResult,
-                                toolCallId = call.id,
-                                name = call.function.name,
-                            ))
-                        }
-                        round++
-                        return@fold
-                    }
-
-                    finalContent = when (choice?.finishReason) {
-                        "stop" -> replyMsg?.content ?: "(空回复)"
-                        "length" -> (replyMsg?.content ?: "") + "\n\n---\n(回复过长，已被截断)"
-                        "content_filter" -> "内容已被安全过滤，请尝试换一种表达方式。"
-                        "insufficient_system_resource" -> "服务繁忙，请稍后重试。"
-                        else -> replyMsg?.content ?: "未知错误，请稍后重试。"
-                    }
-                },
-                onFailure = { e ->
-                    finalContent = "请求失败: ${e.message ?: "未知错误"}"
-                }
-            )
-
-            if (finalContent != null) break
-        }
-
-        val content = finalContent ?: "(搜索轮次超限，请简化问题重试)"
+        val content = runChatSearch(
+            messages, agent, model, config.chat.maxTokens, budget,
+            config.webSearch.finalizeTimeoutSeconds.coerceIn(10, 180) * 1000L,
+        ) { request -> client.chat(request) }
 
         if (config.chat.enableMemory) {
-            sessionManager.saveToSession(sessionKey, augmentedPrompt, content)
+            sessionManager.saveTurn(sessionKey, turn, augmentedPrompt, content)
         }
 
-        val isLong = config.chat.textReplyThreshold > 0 && content.length > config.chat.textReplyThreshold
-        return ChatResult(content, isLong)
+        return ChatResult(content)
     }
 }

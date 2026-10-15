@@ -17,70 +17,74 @@ class SessionManager(private val config: ChatConfig) {
 
     private fun now() = System.currentTimeMillis()
 
-    fun getOrCreate(key: SessionKey): SessionEntry {
+    fun getOrCreate(key: SessionKey): SessionEntry = sessions.compute(key) { _, existing ->
         val ttl = config.memoryTtlMinutes * 60_000L
-        val existing = sessions[key]
-
-        if (existing != null) {
-            if (now() - existing.lastAccessTime > ttl) {
-                sessions.remove(key)
-                return SessionEntry().also { sessions[key] = it }
+        if (existing == null) SessionEntry() else synchronized(existing) {
+            val accessedAt = now()
+            if (accessedAt - existing.lastAccessTime > ttl) {
+                SessionEntry(lastAccessTime = accessedAt)
+            } else {
+                existing.lastAccessTime = accessedAt
+                existing
             }
-            existing.lastAccessTime = now()
-            return existing
         }
-
-        return SessionEntry().also { sessions[key] = it }
-    }
+    }!!
 
     fun clear(key: SessionKey) {
         sessions.remove(key)
     }
 
-    fun buildMessages(key: SessionKey, prompt: String, systemPrompt: String): MutableList<ChatMessage> {
-        if (!config.enableMemory) {
-            return mutableListOf(
-                ChatMessage("system", systemPrompt),
-                ChatMessage("user", prompt)
-            )
-        }
+    internal class Turn(val messages: MutableList<ChatMessage>, internal val session: SessionEntry?)
 
-        val session = getOrCreate(key)
-        val messages = mutableListOf<ChatMessage>()
-        messages.add(ChatMessage("system", systemPrompt))
-        messages.addAll(session.messages)
-        messages.add(ChatMessage("user", prompt))
-        return messages
+    internal fun beginTurn(key: SessionKey, prompt: String, systemPrompt: String): Turn {
+        val session = if (config.enableMemory) getOrCreate(key) else null
+        val history = session?.let { synchronized(it) { it.messages.toList() } }.orEmpty()
+        return Turn((listOf(ChatMessage("system", systemPrompt)) + history + ChatMessage("user", prompt)).toMutableList(), session)
     }
+
+    fun buildMessages(key: SessionKey, prompt: String, systemPrompt: String): MutableList<ChatMessage> =
+        beginTurn(key, prompt, systemPrompt).messages
 
     fun saveToSession(key: SessionKey, userPrompt: String, assistantReply: String) {
         if (!config.enableMemory) return
-        val session = sessions[key] ?: return
+        sessions.computeIfPresent(key) { _, session ->
+            synchronized(session) { append(session, userPrompt, assistantReply) }
+            session
+        }
+    }
 
+    /** A reply started before clear/expiry must never enter the replacement conversation. */
+    internal fun saveTurn(key: SessionKey, turn: Turn, userPrompt: String, assistantReply: String) {
+        if (!config.enableMemory || turn.session == null) return
+        sessions.computeIfPresent(key) { _, session ->
+            if (session === turn.session) synchronized(session) { append(session, userPrompt, assistantReply) }
+            session
+        }
+    }
+
+    private fun append(session: SessionEntry, userPrompt: String, assistantReply: String) {
         session.messages.addLast(ChatMessage("user", userPrompt))
         session.messages.addLast(ChatMessage("assistant", assistantReply))
         session.lastAccessTime = now()
-
         trimSession(session)
     }
 
     private fun trimSession(session: SessionEntry) {
-        val maxMessages = config.memoryRounds * 2
+        val maxMessages = config.memoryRounds.coerceAtLeast(0).toLong() * 2
 
         while (session.messages.size > maxMessages) {
             session.messages.removeFirst()
             session.messages.removeFirst()
         }
 
-        while (estimateTokens(session.messages) > config.maxContextTokens
+        var tokens = session.messages.sumOf(::estimateTokens)
+        while (tokens > config.maxContextTokens
             && session.messages.size >= 2
         ) {
-            session.messages.removeFirst()
-            session.messages.removeFirst()
+            tokens -= estimateTokens(session.messages.removeFirst())
+            tokens -= estimateTokens(session.messages.removeFirst())
         }
     }
 
-    private fun estimateTokens(messages: ArrayDeque<ChatMessage>): Int {
-        return messages.sumOf { ((it.content ?: "").length * 3L / 2L).toInt() }
-    }
+    private fun estimateTokens(message: ChatMessage): Long = (message.content?.length ?: 0) * 3L / 2L
 }
