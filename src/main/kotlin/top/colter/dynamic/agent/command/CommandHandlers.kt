@@ -60,7 +60,6 @@ class CommandHandlers(
     private val sessionManager: SessionManager,
     private val dota2Service: Dota2Service,
     private val dsClient: DeepSeekClient,
-    private val grokClient: DeepSeekClient?,
     private val imageConfig: ImageConfig,
     private val pluginContext: PluginContext,
     private val cacheUtils: CacheUtils,
@@ -70,7 +69,6 @@ class CommandHandlers(
         val dota = DotaHandler()
         buildList {
             add(DsHandler())
-            add(GrokHandler())
             add(dota)
             dotaShortcuts.forEach { add(DotaShortcutHandler(it, dota)) }
         }
@@ -92,7 +90,6 @@ class CommandHandlers(
     private suspend fun handleLlmChat(
         prompt: String,
         key: SessionManager.SessionKey,
-        provider: String,
         usage: String,
         platformId: String,
     ): CommandExecutionResult {
@@ -101,18 +98,7 @@ class CommandHandlers(
             return ok("上下文已清空")
         }
         if (prompt.isBlank()) return fail(usage)
-        val options = if (provider == "grok") {
-            if (config.grok.apiKey.isBlank() || grokClient == null) {
-                return fail("请先在插件配置中填写 Grok API Key")
-            }
-            ChatService.ChatOptions(
-                client = grokClient,
-                model = config.grok.model,
-                systemPrompt = config.grok.systemPrompt.ifBlank { config.chat.systemPrompt },
-                enableWebSearch = false,
-            )
-        } else null
-        val result = chatService.chat(prompt, key, options)
+        val result = chatService.chat(prompt, key)
         return CommandExecutionResult(CommandStatus.SUCCESS,
             prepareChatReply(result.content, config.chat.textReplyThreshold, imageConfig, fontRegistry, cacheUtils, platformId = platformId))
     }
@@ -125,31 +111,12 @@ class CommandHandlers(
         )
 
         override suspend fun handle(invocation: CommandInvocation): CommandExecutionResult {
-            config.chatCommandUnavailable("ds")?.let { return fail(it) }
+            config.chatCommandUnavailable()?.let { return fail(it) }
             val prompt = invocation.args.joinToString(" ").trim()
             val key = SessionManager.SessionKey(invocation.context.target.stableValue(), invocation.context.senderId)
             pluginContext.launchChatReply(invocation.context.target.withPreferredAccount(invocation.context.botAccountId), invocation.replyToMessageId,
                 AgentTrace.create("chat_ds", invocation.context.target.platformId.value, config.diagnostics)) {
-                handleLlmChat(prompt, key, "ds", "用法: ${config.trigger.triggerPrefix.ifBlank { "/ds" }} <问题>", platformId = invocation.context.target.platformId.value).reply
-            }
-            return CommandExecutionResult(CommandStatus.SUCCESS, emptyList())
-        }
-    }
-
-    inner class GrokHandler : CommandHandler {
-        override val spec = CommandSpec(
-            path = listOf(config.grok.triggerPrefix.removePrefix("/").ifBlank { "grok" }),
-            aliases = emptyList(),
-            description = "Grok AI对话",
-        )
-
-        override suspend fun handle(invocation: CommandInvocation): CommandExecutionResult {
-            config.chatCommandUnavailable("grok")?.let { return fail(it) }
-            val prompt = invocation.args.joinToString(" ").trim()
-            val key = SessionManager.SessionKey("${invocation.context.target.stableValue()}|grok", invocation.context.senderId)
-            pluginContext.launchChatReply(invocation.context.target.withPreferredAccount(invocation.context.botAccountId), invocation.replyToMessageId,
-                AgentTrace.create("chat_grok", invocation.context.target.platformId.value, config.diagnostics)) {
-                handleLlmChat(prompt, key, "grok", "用法: ${config.grok.triggerPrefix.ifBlank { "/grok" }} <问题>", platformId = invocation.context.target.platformId.value).reply
+                handleLlmChat(prompt, key, "用法: ${config.trigger.triggerPrefix.ifBlank { "/ds" }} <问题>", platformId = invocation.context.target.platformId.value).reply
             }
             return CommandExecutionResult(CommandStatus.SUCCESS, emptyList())
         }

@@ -3,7 +3,6 @@ package top.colter.dynamic.agent.dota2
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
-import org.jetbrains.skia.Image
 import top.colter.dynamic.agent.config.ImageConfig
 import top.colter.dynamic.agent.draw.dota2OverviewDraw
 import top.colter.dynamic.agent.ds.DeepSeekClient
@@ -11,7 +10,6 @@ import top.colter.dynamic.agent.util.CacheUtils
 import top.colter.dynamic.agent.util.HttpUtils
 import java.net.InetSocketAddress
 import java.nio.file.Files
-import java.nio.file.Path
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.*
@@ -205,29 +203,4 @@ class Dota2OverviewTest {
         } finally { server.stop(0) }
     }
 
-    @Test fun `optional real-data production renderer preview`() = runBlocking<Unit> {
-        if(System.getenv("DOTA_OVERVIEW_PREVIEW")!="true")return@runBlocking
-        val p=Path.of(".codex/tmp/overview-techies");val out=p.resolve("production");Files.createDirectories(out)
-        fun obj(path:Path)=Json.parseToJsonElement(Files.readString(path)).jsonObject
-        val recent=Json.parseToJsonElement(Files.readString(p.resolve("selected-recent.json"))).jsonArray
-        val details=recent.associate { val id=it.jsonObject["match_id"]!!.jsonPrimitive.long;id to obj(p.resolve("$id.json")) }
-        val s=buildOverviewSnapshot(176496411,obj(p.resolve("profile.json")),recent,details,::localizedDota2HeroName)
-        val request=overviewRequest(s,OverviewMode.NORMAL,"deepseek-v4-flash")
-        Files.writeString(out.resolve("request.json"),HttpUtils.json.encodeToString(top.colter.dynamic.agent.ds.ChatRequest.serializer(),request))
-        val rawPath=System.getenv("DOTA_OVERVIEW_RAW")?.let { Path.of(it) }
-        val start=System.nanoTime()
-        val a=if(System.getenv("DOTA_OVERVIEW_LIVE")=="true") {
-            analyzeOverview(s,OverviewMode.NORMAL,DeepSeekClient(requireNotNull(System.getenv("DOTA_OVERVIEW_TEST_KEY")),"https://api.deepseek.com/chat/completions"),"deepseek-v4-flash")
-        } else if(rawPath!=null) try { parseOverviewAnalysis(Files.readString(rawPath),s,allowPartial=true) } catch(e:Exception) { overviewFallback(s,"实测输出未通过校验：${e.message}") }
-            else parseOverviewAnalysis(validRaw(s),s).copy(notice="排版测试夹具：真实十场数据，正文为离线测试文案")
-        Files.writeString(out.resolve("render-notice.txt"),a.notice ?: "API 正文通过当前结构和硬规则检查；不是完整语义校验。")
-        a.rawResponse?.let { Files.writeString(out.resolve("api-raw.txt"),it) }
-        Files.writeString(out.resolve("validation-error.txt"),a.validationError.orEmpty())
-        Files.writeString(out.resolve("timing.txt"),"analysis_seconds="+(System.nanoTime()-start)/1_000_000_000.0)
-        Files.writeString(out.resolve("analysis.json"),buildJsonObject { putJsonArray("sections") { a.sections.forEach { add(buildJsonObject { put("id",it.id);put("body",it.body) }) } } }.toString())
-        Files.writeString(out.resolve("report.txt"),overviewText(s,a))
-        fun image(kind:String,id:Int)=p.resolve("full-assets/$kind-$id.png").takeIf { Files.exists(it) }?.let { Image.makeFromEncoded(Files.readAllBytes(it)) }
-        val assets=Dota2ReportAssets(s.matches.map { it.heroId }.distinct().associateWith { image("hero",it) },s.representatives.flatMap { it.match.items }.distinct().associateWith { image("item",it) },p.resolve("full-assets/avatar.png").takeIf { Files.exists(it) }?.let { Image.makeFromEncoded(Files.readAllBytes(it)) })
-        GeneratedOverview(s,a,OverviewMode.NORMAL,assets).use { g ->dota2OverviewDraw(g,ImageConfig()).use { img -> img.encodeToData()!!.use { Files.write(out.resolve("overview.png"),it.bytes) } } }
-    }
 }

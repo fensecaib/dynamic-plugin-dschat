@@ -13,6 +13,7 @@ import top.colter.dynamic.agent.util.HttpUtils
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpTimeoutException
+import java.time.Duration
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration.Companion.seconds
 
@@ -24,10 +25,11 @@ class DeepSeekClient(
 ) {
     private val requestTimeoutSeconds = requestTimeoutSeconds.coerceAtLeast(1)
     private val defaultRetries = maxRetries.coerceAtLeast(0)
-    private val client: HttpClient = HttpUtils.createClient(
-        connectTimeoutSec = minOf(30, this.requestTimeoutSeconds),
-        requestTimeoutSec = this.requestTimeoutSeconds,
-    )
+    // Keep the credential and conversation body on the explicitly configured endpoint.
+    private val client: HttpClient = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(minOf(30, this.requestTimeoutSeconds)))
+        .followRedirects(HttpClient.Redirect.NEVER)
+        .build()
 
     suspend fun chat(request: ChatRequest, retries: Int = defaultRetries): Result<ChatResponse> {
         currentCoroutineContext().ensureActive()
@@ -165,6 +167,7 @@ class DeepSeekClient(
 
 /** Only fixed categories and text escape this boundary; upstream bodies and causes may contain secrets. */
 private fun httpFailure(status: Int): ApiCallException = when (status) {
+    in 300..399 -> ApiCallException("redirect_rejected", status, "AI 接口返回重定向（HTTP $status），请填写最终的直接请求地址。")
     401 -> ApiCallException("unauthorized", status, "AI 服务认证失败（HTTP 401），请检查 API Key。")
     402 -> ApiCallException("payment_required", status, "AI 服务余额不足（HTTP 402），请检查账户余额。")
     429 -> ApiCallException("rate_limited", status, "AI 服务请求过于频繁（HTTP 429），请稍后重试。")

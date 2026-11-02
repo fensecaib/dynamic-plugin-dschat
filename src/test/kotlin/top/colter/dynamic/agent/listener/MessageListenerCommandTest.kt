@@ -10,7 +10,7 @@ class MessageListenerCommandTest {
         assertEquals("", commandArgument("/ds", "/ds"))
         assertEquals("你好", commandArgument("/ds  你好", "/ds"))
         assertEquals("你好", commandArgument("/ds　你好", "/ds"))
-        assertEquals("hello", commandArgument("!grok hello", "!grok"))
+        assertEquals("hello", commandArgument("!ask hello", "!ask"))
     }
 
     @Test

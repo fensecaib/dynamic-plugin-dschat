@@ -5,8 +5,9 @@ import top.colter.dynamic.agent.chat.ChatService
 import top.colter.dynamic.agent.chat.SessionManager
 import top.colter.dynamic.agent.command.CommandHandlers
 import top.colter.dynamic.agent.config.AgentPluginConfig
-import top.colter.dynamic.agent.config.ChatConfig
+import top.colter.dynamic.agent.config.ApiConfig
 import top.colter.dynamic.agent.config.agentConfigFormSpec
+import top.colter.dynamic.agent.config.agentConfigMigrations
 import top.colter.dynamic.agent.config.normalizeAgentConfig
 import top.colter.dynamic.agent.dota2.Dota2Service
 import top.colter.dynamic.agent.ds.DeepSeekClient
@@ -25,6 +26,7 @@ import top.colter.dynamic.core.config.ConfigurablePlugin
 import top.colter.dynamic.core.plugin.CommandContributor
 import top.colter.dynamic.core.plugin.IncomingMessageConsumerPlugin
 import top.colter.dynamic.core.plugin.IncomingMessageDispatchContext
+import top.colter.dynamic.core.plugin.IncomingMessageFilter
 import top.colter.dynamic.core.plugin.Plugin
 import top.colter.dynamic.core.plugin.PluginContext
 import top.colter.skiko.FontRegistry
@@ -48,13 +50,16 @@ internal class LiveCommandHandler(
 class DynamicAgentPlugin : Plugin, IncomingMessageConsumerPlugin, CommandContributor,
     ConfigurablePlugin<AgentPluginConfig> {
 
+    // Mentioned URLs need the listener; commands remain owned by the host command dispatcher.
+    override val incomingMessageFilter = IncomingMessageFilter(receiveLinkMessages = true)
+
     private lateinit var context: PluginContext
     private lateinit var dataDir: Path
     @Volatile private lateinit var config: AgentPluginConfig
+    private var activeCommandPrefix: String? = null
     private lateinit var dsClient: DeepSeekClient
-    private var grokClient: DeepSeekClient? = null
+    private var lastClientConfig: ApiConfig? = null
     private lateinit var sessionManager: SessionManager
-    private var sessionConfig: ChatConfig? = null
     private lateinit var chatService: ChatService
     private lateinit var dota2Service: Dota2Service
     private lateinit var cacheUtils: CacheUtils
@@ -66,7 +71,7 @@ class DynamicAgentPlugin : Plugin, IncomingMessageConsumerPlugin, CommandContrib
 
     override val configId: String = "dynamic-agent"
     override val configName: String = "\u591a\u529f\u80fdAgent\u63d2\u4ef6"
-    override val configDescription: String = "DeepSeek AI\u5bf9\u8bdd / Grok AI\u5bf9\u8bdd / Dota2\u6218\u62a5 / \u8054\u7f51\u641c\u7d22"
+    override val configDescription: String = "DeepSeek AI\u5bf9\u8bdd / Dota2\u6218\u62a5 / \u8054\u7f51\u641c\u7d22"
     override val configClass = AgentPluginConfig::class
 
     override val configFormSpec = agentConfigFormSpec
@@ -80,9 +85,13 @@ class DynamicAgentPlugin : Plugin, IncomingMessageConsumerPlugin, CommandContrib
 
         loadFonts()
 
-        val loaded = context.configService.loadOrCreate(configId, AgentPluginConfig::class, defaultProvider = { AgentPluginConfig() })
+        val loaded = context.configService.loadOrCreate(
+            configId, AgentPluginConfig::class, migrations = agentConfigMigrations,
+            defaultProvider = { AgentPluginConfig() },
+        )
         this.config = normalizeAgentConfig(loaded)
         if (config != loaded) context.configService.save(configId, config)
+        this.activeCommandPrefix = config.trigger.triggerPrefix
 
         this.dota2Service = Dota2Service(dataDir.toFile(), cacheUtils)
         this.dota2Service.init()
@@ -94,6 +103,11 @@ class DynamicAgentPlugin : Plugin, IncomingMessageConsumerPlugin, CommandContrib
     }
 
     override suspend fun onStart() {
+        // The host registers command paths immediately after this hook returns.
+        if (activeCommandPrefix != config.trigger.triggerPrefix) {
+            activeCommandPrefix = config.trigger.triggerPrefix
+            rebuildServices()
+        }
         workScope.start()
         dota2Service.init()
         if (drawCleanupJob?.isActive != true) {
@@ -145,31 +159,36 @@ class DynamicAgentPlugin : Plugin, IncomingMessageConsumerPlugin, CommandContrib
     }
 
     private fun rebuildServices() {
+        val savedConfig = config
+        val prefix = activeCommandPrefix ?: savedConfig.trigger.triggerPrefix.also { activeCommandPrefix = it }
+        // Keep listener parsing and command usage aligned with the host's registered paths.
+        val serviceConfig = savedConfig.copy(trigger = savedConfig.trigger.copy(triggerPrefix = prefix))
         val workContext = context.copy(scope = workScope)
-        this.dsClient = DeepSeekClient(config.api.apiKey, config.api.apiUrl,
-            requestTimeoutSeconds = config.api.requestTimeoutSeconds.toLong(), maxRetries = config.api.maxRetries)
-        this.grokClient = if (config.grok.enabled && config.grok.apiKey.isNotBlank()) {
-            DeepSeekClient(config.grok.apiKey, config.grok.apiUrl,
-                requestTimeoutSeconds = config.grok.requestTimeoutSeconds.toLong(), maxRetries = config.grok.maxRetries)
-        } else null
-        // Host settings are applied live; unrelated changes must preserve active conversations.
-        if (!::sessionManager.isInitialized || sessionConfig != config.chat) {
-            this.sessionManager = SessionManager(config.chat)
-            this.sessionConfig = config.chat
+        // Presentation and memory updates can share the existing HTTP connection pool.
+        if (!::dsClient.isInitialized || lastClientConfig != serviceConfig.api) {
+            this.dsClient = DeepSeekClient(serviceConfig.api.apiKey, serviceConfig.api.apiUrl,
+                requestTimeoutSeconds = serviceConfig.api.requestTimeoutSeconds.toLong(), maxRetries = serviceConfig.api.maxRetries)
+            lastClientConfig = serviceConfig.api
         }
-        this.chatService = ChatService(config, dsClient, sessionManager)
+        // Keep active conversations while applying retention changes in place.
+        if (!::sessionManager.isInitialized) {
+            this.sessionManager = SessionManager(serviceConfig.chat)
+        } else {
+            sessionManager.updateConfig(serviceConfig.chat)
+        }
+        this.chatService = ChatService(serviceConfig, dsClient, sessionManager)
 
         this.messageListener = MessageListener(
-            config = config, chatService = chatService, sessionManager = sessionManager,
-            dota2Service = dota2Service, dsClient = dsClient, grokClient = grokClient,
-            imageConfig = config.image, pluginContext = workContext, dataDir = dataDir,
+            config = serviceConfig, chatService = chatService, sessionManager = sessionManager,
+            dota2Service = dota2Service, dsClient = dsClient,
+            imageConfig = serviceConfig.image, pluginContext = workContext,
             cacheUtils = cacheUtils, fontRegistry = fontRegistry,
         )
 
         this.commandHandlers = CommandHandlers(
-            config = config, chatService = chatService, sessionManager = sessionManager,
-            dota2Service = dota2Service, dsClient = dsClient, grokClient = grokClient,
-            imageConfig = config.image, pluginContext = workContext, cacheUtils = cacheUtils,
+            config = serviceConfig, chatService = chatService, sessionManager = sessionManager,
+            dota2Service = dota2Service, dsClient = dsClient,
+            imageConfig = serviceConfig.image, pluginContext = workContext, cacheUtils = cacheUtils,
             fontRegistry = fontRegistry,
         )
     }
@@ -177,22 +196,15 @@ class DynamicAgentPlugin : Plugin, IncomingMessageConsumerPlugin, CommandContrib
     override fun currentConfig(): AgentPluginConfig = config
 
     override fun applyConfig(next: AgentPluginConfig): ConfigApplyResult {
-        val prefixChanged = config.trigger.triggerPrefix != next.trigger.triggerPrefix ||
-            config.grok.triggerPrefix != next.grok.triggerPrefix
-        val migrated = normalizeAgentConfig(next)
-        val normalized = if (migrated.grok.useAsAtTrigger && migrated.trigger.enableAtTrigger) {
-            migrated.copy(trigger = migrated.trigger.copy(enableAtTrigger = false))
-        } else migrated
-        this.config = normalized
+        val normalized = normalizeAgentConfig(next)
+        val prefixChanged = (activeCommandPrefix ?: config.trigger.triggerPrefix) != normalized.trigger.triggerPrefix
         context.configService.save(configId, normalized)
+        this.config = normalized
         rebuildServices()
         return ConfigApplyResult(
             changed = true,
             restartRequired = prefixChanged,
             message = buildList {
-                if (next.grok.useAsAtTrigger && next.trigger.enableAtTrigger) {
-                    add("Grok @Bot 触发已开启，已自动关闭 DeepSeek @Bot 触发")
-                }
                 if (prefixChanged) add("功能开关已生效；命令前缀修改需重启插件后生效")
                 if (next.api.model != normalized.api.model) add("已将官方 Flash 模型更新为 deepseek-flash")
             }.joinToString("；")

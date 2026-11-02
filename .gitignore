@@ -50,3 +50,18 @@ debug/
 
 # Local analysis, test credentials and generated review artifacts
 .codex/
+
+# Local credentials, runtime data and logs
+.env
+.env.*
+!.env.example
+!.env.sample
+local.properties
+/config/
+/data/
+/logs/
+*.log
+*.key
+*.pem
+*.p12
+*.pfx

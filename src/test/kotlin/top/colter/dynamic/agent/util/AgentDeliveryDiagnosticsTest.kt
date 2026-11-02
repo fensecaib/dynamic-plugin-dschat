@@ -97,7 +97,7 @@ class AgentDeliveryDiagnosticsTest {
 
     private fun context(send: suspend (List<TargetAddress>, List<MessageBatch>, PluginMessagePublishOptions) -> PluginMessagePublishResult) = PluginContext(
         pluginId = "send-diagnostics-test",
-        descriptor = PluginDescriptor(id = "send-diagnostics-test", name = "test", version = "test", mainClass = "test", apiVersion = "3.0.0"),
+        descriptor = PluginDescriptor(id = "send-diagnostics-test", name = "test", version = "test", mainClass = "test", apiVersion = "4.0.0"),
         configService = unused(), dataStore = unused(), scope = CoroutineScope(SupervisorJob()),
         taskScheduler = unused(), sourceUpdatePublisher = unused(), sourceStateStore = unused(), subscriptionQueryService = unused(),
         messagePublisher = object : PluginMessagePublisher {

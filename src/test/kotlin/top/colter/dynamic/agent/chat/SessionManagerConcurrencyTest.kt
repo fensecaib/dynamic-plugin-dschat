@@ -90,9 +90,10 @@ class SessionManagerConcurrencyTest {
     }
 
     @Test fun `expired conversation does not accept an older turn`() {
-        val sessions = SessionManager(ChatConfig(memoryTtlMinutes = 1))
+        var time = 0L
+        val sessions = SessionManager(ChatConfig(memoryTtlMinutes = 1), now = { time })
         val old = sessions.beginTurn(key, "old", "system")
-        old.session!!.lastAccessTime = System.currentTimeMillis() - 120_000
+        time = 120_000L
         val fresh = sessions.beginTurn(key, "new", "system")
         sessions.saveTurn(key, old, "old", "old reply")
         sessions.saveTurn(key, fresh, "new", "new reply")

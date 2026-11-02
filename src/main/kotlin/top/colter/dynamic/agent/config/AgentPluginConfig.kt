@@ -1,16 +1,18 @@
 package top.colter.dynamic.agent.config
 
 import kotlinx.serialization.Serializable
-import java.net.URI
+import kotlinx.serialization.json.JsonIgnoreUnknownKeys
+import top.colter.dynamic.core.config.ConfigMigration
 
 @Serializable
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+@JsonIgnoreUnknownKeys
 data class AgentPluginConfig(
     val api: ApiConfig = ApiConfig(),
     val chat: ChatConfig = ChatConfig(),
     val trigger: TriggerConfig = TriggerConfig(),
     val image: ImageConfig = ImageConfig(),
     val webSearch: WebSearchConfig = WebSearchConfig(),
-    val grok: GrokConfig = GrokConfig(),
     val dota2: Dota2Config = Dota2Config(),
     val weibo: WeiboDrawConfig = WeiboDrawConfig(),
     val diagnostics: DiagnosticsConfig = DiagnosticsConfig(),
@@ -45,20 +47,6 @@ data class TriggerConfig(
 )
 
 @Serializable
-data class GrokConfig(
-    val enabled: Boolean = false,
-    val apiKey: String = "",
-    val apiUrl: String = "https://g-api.duckdns.org/v1/chat/completions",
-    val model: String = "grok-4.5",
-    val triggerPrefix: String = "/grok",
-    val useAsAtTrigger: Boolean = false,
-    val systemPrompt: String = "你是 Grok，一个有帮助的AI助手。",
-    val enableCommandTrigger: Boolean = true,
-    val requestTimeoutSeconds: Int = 120,
-    val maxRetries: Int = 2,
-)
-
-@Serializable
 data class ImageConfig(
     val defaultColor: String = "#667eea;#764ba2",
     val factor: Float = 1f,
@@ -66,15 +54,12 @@ data class ImageConfig(
 )
 
 @Serializable
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+@JsonIgnoreUnknownKeys
 data class WebSearchConfig(
     val enabled: Boolean = true,
-    val maxRounds: Int = 5,
-    val totalTimeoutSeconds: Int = 90,
-    val finalizeTimeoutSeconds: Int = 60,
-    val searchTimeout: Int = 30,
-    val fetchMaxChars: Int = 8000,
-    val fetchTimeout: Int = 15,
-    val tavilyApiKey: String = "",
+    val officialApiKey: String = "",
+    val fallbackEnabled: Boolean = false,
 )
 
 @Serializable
@@ -97,12 +82,27 @@ data class DiagnosticsConfig(
     val slowStageWarningSeconds: Int = 30,
 )
 
+/** 删除退役服务的凭据与设置，保留用户原先保存的 DeepSeek 触发选择。 */
+internal val agentConfigMigrations = listOf(
+    ConfigMigration(id = "remove-retired-grok-config", description = "移除退役对话服务的配置") {
+        remove("grok")
+    },
+    ConfigMigration(id = "remove-retired-tavily-config", description = "移除退役网页预读取服务的配置") {
+        remove("webSearch.tavilyApiKey")
+    },
+    ConfigMigration(id = "simplify-web-search-budget-config-v008", description = "移除由联网证据预算统一管理的旧调节项") {
+        remove("webSearch.maxRounds")
+        remove("webSearch.totalTimeoutSeconds")
+        remove("webSearch.finalizeTimeoutSeconds")
+        remove("webSearch.searchTimeout")
+        remove("webSearch.fetchTimeout")
+        remove("webSearch.fetchMaxChars")
+    },
+)
+
 /** 仅迁移 DeepSeek 官方服务的旧 Flash 别名，保留第三方供应商自己的模型命名。 */
 internal fun normalizeAgentConfig(config: AgentPluginConfig): AgentPluginConfig {
-    val officialEndpoint = runCatching {
-        val endpoint = URI(config.api.apiUrl.trim())
-        endpoint.scheme?.lowercase() in listOf("https", "http") && endpoint.host.equals("api.deepseek.com", ignoreCase = true)
-    }.getOrDefault(false)
+    val officialEndpoint = isOfficialDeepSeekEndpoint(config.api.apiUrl)
     val oldFlashAlias = config.api.model.trim() in setOf("deepseek-v4-flash", "deepseek-v4-flash-vision-exp")
     return if (officialEndpoint && oldFlashAlias) {
         config.copy(api = config.api.copy(model = "deepseek-flash"))

@@ -21,20 +21,48 @@ class ChatInteractionTest {
         ToolCall("a", function = FunctionCall("search", "{}")), ToolCall("b", function = FunctionCall("search", "{}"))))))))
 
     @Test fun `round exhaustion summarizes existing results without tools`() = runBlocking {
-        val messages = mutableListOf(ChatMessage("user", "问题"))
+        val customPrompt = "请用轻松口语回答，最多两句话，不使用标题和列表。"
+        val messages = mutableListOf(ChatMessage("system", customPrompt), ChatMessage("user", "问题"))
         var requests = 0
+        val expected = "查到啦，结果就是这样。[来源](https://example.com/source)"
         val text = runChatSearch(messages, agent(1), "model", 100, SearchBudget(5000), 1000) { request ->
             requests++
             if (requests == 1) tools() else {
                 assertNull(request.tools)
                 assertNull(request.toolChoice)
                 assertEquals(listOf("a", "b"), request.messages.filter { it.role == "tool" }.map { it.toolCallId })
-                response("依据资料的回答")
+                val systemMessages = request.messages.filter { it.role == "system" }
+                assertEquals(2, systemMessages.size)
+                assertEquals(customPrompt, systemMessages.first().content)
+                val finalInstruction = systemMessages.last().content.orEmpty()
+                assertContains(finalInstruction, "语言、语气、篇幅和排版遵循原有系统提示")
+                assertContains(finalInstruction, "仅对影响结论且无法确认的部分作简短说明")
+                assertFalse(finalInstruction.contains("预算"))
+                assertFalse(finalInstruction.contains("资料不足时明确说明"))
+                response(expected)
             }
         }
         assertEquals(2, requests)
-        assertContains(text, "依据资料的回答")
-        assertContains(text, "上限")
+        assertEquals(expected, text)
+    }
+
+    @Test fun `tool results preserve custom system prompt and return model answer without rewriting`() = runBlocking {
+        val customPrompt = "用英文写一段简短回答，不要标题或来源列表。"
+        val messages = mutableListOf(ChatMessage("system", customPrompt), ChatMessage("user", "查一下这个问题"))
+        val expected = "Here is the answer, with a [source](https://example.com/source)."
+        var requests = 0
+        val text = runChatSearch(messages, agent(2), "model", 100, SearchBudget(5000), 1000) { request ->
+            requests++
+            assertEquals(listOf(customPrompt), request.messages.filter { it.role == "system" }.map { it.content })
+            if (requests == 1) tools() else {
+                assertNotNull(request.tools)
+                assertEquals("auto", request.toolChoice)
+                assertEquals(2, request.messages.count { it.role == "tool" })
+                response(expected)
+            }
+        }
+        assertEquals(2, requests)
+        assertEquals(expected, text)
     }
 
     @Test fun `budget expiry cancels a running tool and completes remaining tool ids`() = runBlocking {
@@ -42,11 +70,12 @@ class ChatInteractionTest {
         var executed = 0
         var requests = 0
         val a = agent { executed++; try { delay(5000); "late" } finally { stopped = true } }
-        val text = runChatSearch(mutableListOf(), a, "model", 100, SearchBudget(100), 1000) { request ->
+        val text = runChatSearch(mutableListOf(), a, "model", 100, SearchBudget(300, reserveMs = 200), 1000) { request ->
             requests++
             if (requests == 1) tools() else {
                 assertTrue(stopped)
                 assertEquals(2, request.messages.count { it.role == "tool" })
+                assertTrue(request.messages.filter { it.role == "tool" }.all { it.content == "本次调用未完成，未获取资料。" })
                 assertFalse(request.messages.any { it.content == "late" })
                 assertNull(request.tools)
                 response("有限资料答复")
@@ -110,6 +139,30 @@ class ChatInteractionTest {
         assertTrue(stopped)
         assertContains(failure.message!!, "本次任务已结束")
         assertFalse(failure.message!!.contains("迟到回复"))
+    }
+
+    @Test fun `research reserve is kept for finalization within the same global deadline`() = runBlocking {
+        var nanos = 0L
+        var researchCalls = 0
+        var finalCalls = 0
+        val budget = SearchBudget(timeoutMs = 1000, reserveMs = 300, nowNanos = { nanos })
+        assertEquals("research", budget.run { researchCalls++; nanos = 700_000_000; "research" })
+        assertNull(budget.run { researchCalls++; "should not start" })
+        assertEquals("answer", budget.runFinal(1000) { finalCalls++; nanos = 1_000_000_000; "answer" })
+        assertNull(budget.runFinal(1000) { finalCalls++; "late answer" })
+        assertEquals(1, researchCalls)
+        assertEquals(1, finalCalls)
+    }
+
+    @Test fun `finalization cannot run beyond the global deadline even with a larger allowance`() = runBlocking {
+        var stopped = false
+        val budget = SearchBudget(timeoutMs = 60, reserveMs = 60)
+        val result = budget.runFinal(5000) {
+            try { delay(1000); "late answer" } finally { stopped = true }
+        }
+        assertNull(result)
+        assertTrue(stopped)
+        assertNull(budget.runFinal(5000) { "another attempt" })
     }
 
     private val reply = listOf(MessageBatch(listOf(MessageContent.Text("最终回复"))))

@@ -56,7 +56,7 @@ class Dota2ReportTaskGateTest {
         for (mode in Dota2ReportMode.entries) {
             assertEquals(200L, resolveDotaReportMatchId(null, mode) { recent })
             assertEquals(100L, resolveDotaReportMatchId("2", mode) { recent })
-            assertEquals(8988982914L, resolveDotaReportMatchId("8988982914", mode) { error("must not fetch") })
+            assertEquals(2002L, resolveDotaReportMatchId("2002", mode) { error("must not fetch") })
             val error = assertFailsWith<IllegalArgumentException> {
                 resolveDotaReportMatchId("abc", mode) { error("must not fetch") }
             }

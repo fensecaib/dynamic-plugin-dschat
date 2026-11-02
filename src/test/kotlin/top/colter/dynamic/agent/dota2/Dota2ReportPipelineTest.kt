@@ -31,7 +31,7 @@ class Dota2ReportPipelineTest {
         setField("itemIconPaths", mutableMapOf(2 to "/item.png"))
         listOf("aghsScepterYes", "aghsScepterNo", "aghsShardYes", "aghsShardNo").forEach { setField(it, icon) }
         val match = buildJsonObject {
-            put("match_id", 8980854337L); put("radiant_win", true); put("duration", 2400)
+            put("match_id", 2001L); put("radiant_win", true); put("duration", 2400)
             putJsonArray("players") {
                 for (i in 1..2) add(buildJsonObject {
                     put("account_id", i); put("hero_id", if (i == 1) 11 else 8); put("personaname", if (i == 1) "A" else "B")

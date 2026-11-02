@@ -12,17 +12,34 @@ class FeaturePolicyTest {
     private val aiDotaCommands = listOf("战报", "深度战报", "分析", "个人详情", "深度个人详情")
 
     @Test
+    fun `config form exposes independent deepseek controls without retired provider fields`() {
+        val fields = agentConfigFormSpec.fields
+        assertTrue(fields.any { it.path == "chat.enabled" })
+        assertTrue(fields.any { it.path == "trigger.enableCommandTrigger" })
+        assertTrue(fields.any { it.path == "trigger.enableAtTrigger" })
+        assertFalse(fields.any { field ->
+            listOf(field.path, field.label, field.section, field.description).any { value ->
+                listOf("grok", "tavily").any { value.contains(it, ignoreCase = true) }
+            }
+        })
+        assertEquals(listOf("trigger.triggerPrefix"), fields.filter { it.restartRequired }.map { it.path })
+        assertEquals(
+            setOf("webSearch.enabled", "webSearch.officialApiKey", "webSearch.fallbackEnabled"),
+            fields.filter { it.section == "联网搜索" }.map { it.path }.toSet(),
+        )
+        assertEquals(top.colter.dynamic.core.config.ConfigFieldType.SECRET, fields.single { it.path == "webSearch.officialApiKey" }.type)
+    }
+
+    @Test
     fun `existing configuration keeps previously enabled features`() {
         val old = Json.decodeFromString<AgentPluginConfig>("""{"api":{"apiKey":"old-key"},"dota2":{"enableBinding":false}}""")
         assertTrue(old.chat.enabled)
         assertTrue(old.trigger.enableCommandTrigger)
-        assertTrue(old.grok.enableCommandTrigger)
-        assertFalse(old.grok.enabled)
         assertTrue(old.dota2.enabled)
         assertTrue(old.dota2.enableHistory)
         assertTrue(old.dota2.enableAnalysis)
         assertFalse(old.dota2.enableBinding)
-        assertNull(old.chatCommandUnavailable("ds"))
+        assertNull(old.chatCommandUnavailable())
     }
 
     @Test
@@ -30,7 +47,6 @@ class FeaturePolicyTest {
         val paused = ready.copy(
             chat = ready.chat.copy(enabled = false),
             trigger = ready.trigger.copy(enableCommandTrigger = false, enableAtTrigger = false),
-            grok = ready.grok.copy(enableCommandTrigger = false),
             dota2 = Dota2Config(enabled = false, enableBinding = false, enableHistory = false, enableAnalysis = false),
         )
         assertEquals(paused, Json.decodeFromString<AgentPluginConfig>(Json.encodeToString(AgentPluginConfig.serializer(), paused)))
@@ -39,13 +55,13 @@ class FeaturePolicyTest {
     @Test
     fun `chat and dota can be enabled independently`() {
         val dotaOnly = ready.copy(chat = ready.chat.copy(enabled = false))
-        assertTrue(dotaOnly.chatCommandUnavailable("ds")!!.contains("已暂停"))
-        assertFalse(dotaOnly.chatAtAvailable("ds"))
+        assertTrue(dotaOnly.chatCommandUnavailable()!!.contains("已暂停"))
+        assertFalse(dotaOnly.chatAtAvailable())
         assertNull(dotaOnly.dotaCommandUnavailable("战报"))
 
         val chatOnly = ready.copy(dota2 = ready.dota2.copy(enabled = false))
-        assertNull(chatOnly.chatCommandUnavailable("ds"))
-        assertTrue(chatOnly.chatAtAvailable("ds"))
+        assertNull(chatOnly.chatCommandUnavailable())
+        assertTrue(chatOnly.chatAtAvailable())
         for (command in listOf(null, "绑定", "历史") + aiDotaCommands) {
             assertTrue(chatOnly.dotaCommandUnavailable(command)!!.contains("Dota2 功能已暂停"))
         }
@@ -54,29 +70,12 @@ class FeaturePolicyTest {
     @Test
     fun `command and mention triggers can be paused independently`() {
         val mentionsOnly = ready.copy(trigger = ready.trigger.copy(enableCommandTrigger = false))
-        assertTrue(mentionsOnly.chatCommandUnavailable("ds")!!.contains("命令对话已暂停"))
-        assertTrue(mentionsOnly.chatAtAvailable("ds"))
+        assertTrue(mentionsOnly.chatCommandUnavailable()!!.contains("命令对话已暂停"))
+        assertTrue(mentionsOnly.chatAtAvailable())
 
         val commandsOnly = ready.copy(trigger = ready.trigger.copy(enableAtTrigger = false))
-        assertNull(commandsOnly.chatCommandUnavailable("ds"))
-        assertFalse(commandsOnly.chatAtAvailable("ds"))
-    }
-
-    @Test
-    fun `grok requires its provider and own credentials and respects the global chat switch`() {
-        val grok = AgentPluginConfig(grok = GrokConfig(enabled = true, apiKey = "grok-key", useAsAtTrigger = true))
-        assertNull(grok.chatCommandUnavailable("grok"))
-        assertTrue(grok.chatAtAvailable("grok"))
-        assertFalse(grok.chatAtAvailable("ds"))
-        assertTrue(grok.chatCommandUnavailable("ds")!!.contains("DeepSeek API Key"))
-        assertFalse(grok.copy(grok = grok.grok.copy(enabled = false)).chatAtAvailable("grok"))
-
-        val mentionsOnly = grok.copy(grok = grok.grok.copy(enableCommandTrigger = false))
-        assertTrue(mentionsOnly.chatCommandUnavailable("grok")!!.contains("命令对话已暂停"))
-        assertTrue(mentionsOnly.chatAtAvailable("grok"))
-        val paused = grok.copy(chat = grok.chat.copy(enabled = false))
-        assertTrue(paused.chatCommandUnavailable("grok")!!.contains("AI 对话功能已暂停"))
-        assertFalse(paused.chatAtAvailable("grok"))
+        assertNull(commandsOnly.chatCommandUnavailable())
+        assertFalse(commandsOnly.chatAtAvailable())
     }
 
     @Test
@@ -85,8 +84,8 @@ class FeaturePolicyTest {
         assertNull(config.dotaCommandUnavailable("绑定"))
         assertNull(config.dotaCommandUnavailable("历史"))
         assertNull(config.dotaCommandUnavailable(null))
-        assertTrue(config.chatCommandUnavailable("ds")!!.contains("DeepSeek API Key"))
-        assertFalse(config.chatAtAvailable("ds"))
+        assertTrue(config.chatCommandUnavailable()!!.contains("DeepSeek API Key"))
+        assertFalse(config.chatAtAvailable())
         for (command in aiDotaCommands) {
             assertTrue(config.dotaCommandUnavailable(command)!!.contains("DeepSeek API Key"), command)
         }
@@ -107,14 +106,9 @@ class FeaturePolicyTest {
     fun `incomplete provider settings do not start chat or ai analysis`() {
         for (api in listOf(ready.api.copy(apiUrl = " "), ready.api.copy(model = " "))) {
             val config = ready.copy(api = api)
-            assertTrue(config.chatCommandUnavailable("ds") != null)
-            assertFalse(config.chatAtAvailable("ds"))
+            assertTrue(config.chatCommandUnavailable() != null)
+            assertFalse(config.chatAtAvailable())
             assertTrue(config.dotaCommandUnavailable("战报") != null)
-        }
-        for (provider in listOf(GrokConfig(enabled = true, apiKey = " "), GrokConfig(enabled = true, apiKey = "key", apiUrl = " "), GrokConfig(enabled = true, apiKey = "key", model = " "))) {
-            val config = ready.copy(grok = provider.copy(useAsAtTrigger = true))
-            assertTrue(config.chatCommandUnavailable("grok") != null)
-            assertFalse(config.chatAtAvailable("grok"))
         }
     }
 }

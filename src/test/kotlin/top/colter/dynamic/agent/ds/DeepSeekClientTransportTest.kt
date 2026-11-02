@@ -13,6 +13,48 @@ import kotlin.test.*
 class DeepSeekClientTransportTest {
     private val validAnswer = """{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"完整分析文本"}}]}"""
 
+    @Test fun `authenticated requests never follow redirects to another endpoint`() = runBlocking<Unit> {
+        val destination = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val redirectedRequests = AtomicInteger()
+        destination.createContext("/other") { exchange ->
+            redirectedRequests.incrementAndGet()
+            exchange.requestBody.readBytes()
+            val bytes = validAnswer.toByteArray()
+            exchange.sendResponseHeaders(200, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+            exchange.close()
+        }
+        destination.start()
+        val origin = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val attempts = AtomicInteger()
+        val redirectStatus = AtomicInteger(307)
+        origin.createContext("/chat") { exchange ->
+            attempts.incrementAndGet()
+            exchange.requestBody.readBytes()
+            exchange.responseHeaders.set("Location", "http://127.0.0.1:${destination.address.port}/other")
+            exchange.sendResponseHeaders(redirectStatus.get(), -1)
+            exchange.close()
+        }
+        origin.start()
+        try {
+            val client = DeepSeekClient("local-redirect-test-token", "http://127.0.0.1:${origin.address.port}/chat")
+            for (status in listOf(301, 302, 303, 307, 308)) {
+                redirectStatus.set(status)
+                val before = attempts.get()
+                val result = client.chat(ChatRequest("test", listOf(ChatMessage("user", "private local fixture"))))
+                assertEquals(0, redirectedRequests.get(), "HTTP $status must not forward credentials or conversation data")
+                val failure = assertIs<ApiCallException>(result.exceptionOrNull())
+                assertEquals("redirect_rejected", failure.category)
+                assertEquals(status, failure.statusCode)
+                assertEquals(before + 1, attempts.get())
+                assertFalse(failure.message.orEmpty().contains("/other"))
+            }
+        } finally {
+            origin.stop(0)
+            destination.stop(0)
+        }
+    }
+
     @Test fun `missing credentials never sends a request or retries`() = runBlocking {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val attempts = AtomicInteger()

@@ -37,10 +37,10 @@ class OpenDotaApiTest {
         for ((status, reason) in mapOf(522 to "源服务器超时", 524 to "响应超时", 503 to "服务端或网关异常", 429 to "限流", 403 to "拒绝访问")) {
             withApi(status, "private upstream error details") { service ->
                 val calls: List<suspend () -> Any?> = listOf(
-                    { service.validatePlayer(176496411) },
-                    { service.getRecentMatches(176496411, 10) },
-                    { service.getMatchDetail(8988982914) },
-                    { service.getOverviewSnapshot(176496411) },
+                    { service.validatePlayer(100000001) },
+                    { service.getRecentMatches(100000001, 10) },
+                    { service.getMatchDetail(2001) },
+                    { service.getOverviewSnapshot(100000001) },
                 )
                 for (call in calls) {
                     val error = assertFailsWith<OpenDotaApiException> {
@@ -58,14 +58,14 @@ class OpenDotaApiTest {
 
     @Test fun `missing records remain distinct from an outage`() {
         withApi(404, "not found") { service ->
-            assertNull(service.validatePlayer(176496411))
-            assertNull(service.getRecentMatches(176496411))
-            assertNull(service.getMatchDetail(8988982914))
+            assertNull(service.validatePlayer(100000001))
+            assertNull(service.getRecentMatches(100000001))
+            assertNull(service.getMatchDetail(2001))
         }
-        withApi(200, "[]") { assertTrue(it.getRecentMatches(176496411)!!.isEmpty()) }
-        withApi(200, "{\"profile\":null}") { assertNull(it.validatePlayer(176496411)) }
+        withApi(200, "[]") { assertTrue(it.getRecentMatches(100000001)!!.isEmpty()) }
+        withApi(200, "{\"profile\":null}") { assertNull(it.validatePlayer(100000001)) }
         withApi(200, "{\"profile\":{\"personaname\":\"test\"}}") {
-            assertEquals("test", it.validatePlayer(176496411))
+            assertEquals("test", it.validatePlayer(100000001))
         }
     }
 
@@ -73,19 +73,19 @@ class OpenDotaApiTest {
         for (body in listOf("<html>upstream unavailable</html>", "{}", "[null]", "[{\"match_id\":{}}]", "[{\"match_id\":1,\"start_time\":{}}]")) {
             withApi(200, body) { service ->
                 assertContains(assertFailsWith<OpenDotaApiException> {
-                    service.getRecentMatches(176496411)
+                    service.getRecentMatches(100000001)
                 }.message.orEmpty(), "数据格式异常")
             }
         }
         withApi(200, "{\"error\":\"internal details\"}") { service ->
-            assertFailsWith<OpenDotaApiException> { service.validatePlayer(176496411) }
-            assertFailsWith<OpenDotaApiException> { service.getMatchDetail(8988982914) }
+            assertFailsWith<OpenDotaApiException> { service.validatePlayer(100000001) }
+            assertFailsWith<OpenDotaApiException> { service.getMatchDetail(2001) }
         }
         withApi(200, "{\"profile\":{\"personaname\":123}}") {
-            assertFailsWith<OpenDotaApiException> { it.validatePlayer(176496411) }
+            assertFailsWith<OpenDotaApiException> { it.validatePlayer(100000001) }
         }
         withApi(200, "{\"match_id\":123}") {
-            assertFailsWith<OpenDotaApiException> { it.getMatchDetail(8988982914) }
+            assertFailsWith<OpenDotaApiException> { it.getMatchDetail(2001) }
             assertNotNull(it.getMatchDetail(123))
         }
     }
@@ -100,7 +100,7 @@ class OpenDotaApiTest {
             kotlinx.coroutines.coroutineScope {
                 val request = launch {
                     service.reportTasks.runIfIdle(onBusy = { error("busy") }) {
-                        service.getRecentMatches(176496411)
+                        service.getRecentMatches(100000001)
                     }
                 }
                 try {

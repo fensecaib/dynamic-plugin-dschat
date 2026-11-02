@@ -6,7 +6,7 @@ plugins {
 apply(from = "gradle/dynamic-plugin-fatjar.gradle.kts")
 
 group = "top.colter.dynamic"
-version = "0.0.7"
+version = "0.0.8"
 
 repositories {
     mavenLocal()
@@ -15,8 +15,8 @@ repositories {
 
 dependencies {
     val coroutinesVersion = "1.11.0"
-    // core 0.0.4 对应插件 API 3.0.0，与 plugin.yml 保持一致。
-    val coreVersion = "0.0.4"
+    // dynamic-bot v0.0.10 使用 core 0.0.6，对应插件 API 4.0.0，与 plugin.yml 保持一致。
+    val coreVersion = "0.0.6"
     val kotlinLoggingVersion = "8.0.4"
     val serializationVersion = "1.11.0"
 
@@ -33,7 +33,6 @@ dependencies {
     implementation("org.commonmark:commonmark:0.30.0")
     implementation("org.commonmark:commonmark-ext-gfm-tables:0.30.0")
     implementation("org.commonmark:commonmark-ext-gfm-strikethrough:0.30.0")
-    implementation("org.jsoup:jsoup:1.18.1")
     implementation("com.google.zxing:core:3.5.4")
     implementation("com.google.zxing:javase:3.5.4")
 

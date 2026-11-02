@@ -7,7 +7,7 @@
 ## 功能
 
 - **AI 对话** — 多轮对话，支持记忆（轮数/Token/TTL 三层保护），长文本自动渲染为图片
-- **联网搜索** — ReAct Agent 模式，三层搜索后备 (Exa MCP → Parallel MCP → DuckDuckGo)
+- **联网搜索** — DeepSeek Search 和 Fetch 主链，按证据缺口补查；可选 Exa MCP → Parallel MCP → DuckDuckGo 备用链路，默认关闭
 - **Dota2 战报** — OpenDota API + DeepSeek AI 分析，MVP/战犯识别，表格图片渲染
 - **Dota2 历史** — 近期战绩卡片，英雄头像、彩色 K/D/A、胜负汇总与实时序号查询
 - **Dota2 分析** — 双阵营全分析
@@ -78,13 +78,13 @@
 
 ## 安装
 
-本插件面向插件 API **3.x** 的 dynamic-bot 宿主，编译依赖 `dynamic-bot-core:0.0.4`，`plugin.yml` 声明 `apiVersion: 3.0.0`。core 依赖版本与插件 API 版本是两套版本号；API 2.x / 4.x 宿主需要对应版本的插件。
+本插件适配 dynamic-bot v0.0.10（插件 API **4.x**），使用 `dynamic-bot-core:0.0.6` 编译，插件声明 `apiVersion: 4.0.0`。
 
 ```powershell
 .\gradlew.bat fatJar
 ```
 
-把 `build/libs/dynamic-bot-agent-0.0.7-all.jar` 放入宿主 `plugins/` 目录，启动或重启 dynamic-bot 即可。
+把 `build/libs/dynamic-bot-agent-0.0.8-all.jar` 放入宿主 `plugins/` 目录，启动或重启 dynamic-bot 即可。
 
 > 构建前需将 `top.colter.skiko:skiko-layout:0.0.9` 安装到本地 Maven 仓库。
 
@@ -94,9 +94,9 @@
 
 | 区域 | 配置项 | 类型 | 说明 |
 |------|--------|------|------|
-| **DeepSeek API** | API Key | SECRET | 必填，从 platform.deepseek.com 获取 |
+| **DeepSeek API** | API Key | SECRET | AI 对话与分析需要，从 platform.deepseek.com 获取 |
 | | API URL | TEXT | 默认 `https://api.deepseek.com/chat/completions` |
-| | 模型 | SELECT | V4 Flash / V4 Pro |
+| | 模型 | TEXT | 填写官方或兼容服务的模型名称 |
 | **对话** | 系统提示词 | TEXTAREA | |
 | | 最大 Token | NUMBER | 256-16384 |
 | | 图片阈值 | NUMBER | 超过此字数自动渲染为图片，0=始终文本 |
@@ -106,11 +106,13 @@
 | | 上下文 Token 限制 | NUMBER | 超限自动踢出早期轮次 |
 | **触发** | 触发前缀 | TEXT | 默认 `/ds` |
 | | @Bot 触发 | BOOLEAN | 开启后 @Bot 即可对话 |
-| **搜索** | 启用联网搜索 | BOOLEAN | ReAct Agent 模式 |
-| | 最大轮数 | NUMBER | 工具调用最大轮次 |
-| | Tavily API Key | SECRET | 可选，用于 URL 预抓取 |
+| **搜索** | 启用联网搜索 | BOOLEAN | 默认开启，按需使用 DeepSeek Search 和 Fetch |
+| | 联网搜索官方 API Key | SECRET | 选填；官方聊天地址可复用聊天 Key，第三方聊天服务需单独填写 DeepSeek 官方 Key |
+| | 启用备用联网链路 | BOOLEAN | 默认关闭；开启后允许 Exa → Parallel → DuckDuckGo 补查 |
 | **图片** | 主题色 | TEXT | `#667eea;#764ba2` 格式，分号分隔 |
 | | 倍率 | NUMBER | 1.0-4.0 |
+
+联网默认使用 DeepSeek Search 和 Fetch，根据证据缺口补充搜索或读取原文，信息足够后停止，并受调用次数、总时限和资料长度上限约束。Exa → Parallel → DuckDuckGo 备用链路默认关闭，可在设置中开启，仅在主链失败或资料不足时补查。现有对话输出风格保持不变；启动时会通过配置迁移清理明确弃用的 Grok、Tavily 和旧联网调节项。
 
 ## 缓存
 

@@ -1,6 +1,5 @@
 package top.colter.dynamic.agent.listener
 
-import kotlinx.serialization.json.*
 import org.jetbrains.skia.Image
 import top.colter.dynamic.agent.chat.ChatService
 import top.colter.dynamic.agent.chat.SessionManager
@@ -35,8 +34,6 @@ import top.colter.dynamic.agent.draw.dota2HistoryDraw
 import top.colter.dynamic.agent.draw.dota2FullAnalyzeDraw
 import top.colter.dynamic.agent.draw.dota2OverviewDraw
 import top.colter.dynamic.agent.util.cacheRenderedImage
-import top.colter.dynamic.agent.util.requireAccepted
-import top.colter.dynamic.agent.util.CacheType
 import top.colter.dynamic.agent.util.CacheUtils
 import top.colter.dynamic.agent.util.AgentDiagnostics
 import top.colter.dynamic.agent.util.AgentTrace
@@ -51,10 +48,7 @@ import top.colter.dynamic.core.data.MessageContent
 import top.colter.dynamic.core.data.TargetAddress
 import top.colter.dynamic.core.plugin.IncomingMessageDispatchContext
 import top.colter.dynamic.core.plugin.PluginContext
-import top.colter.dynamic.core.plugin.PluginMessagePublishOptions
 import top.colter.skiko.FontRegistry
-import java.io.File
-import java.nio.file.Path
 import kotlin.coroutines.cancellation.CancellationException
 
 /** 仅匹配完整命令前缀，避免将 `/dsa` 识别为 `/ds`。 */
@@ -72,10 +66,8 @@ class MessageListener(
     private val sessionManager: SessionManager,
     private val dota2Service: Dota2Service,
     private val dsClient: DeepSeekClient,
-    private val grokClient: DeepSeekClient?,
     private val imageConfig: ImageConfig,
     private val pluginContext: PluginContext,
-    private val dataDir: Path,
     private val cacheUtils: CacheUtils,
     private val fontRegistry: FontRegistry,
 ) {
@@ -87,30 +79,19 @@ class MessageListener(
 
         val baseKey = SessionManager.SessionKey(targetId = target.stableValue(), senderId = senderId)
         val dsPrefix = config.trigger.triggerPrefix.ifBlank { "/ds" }
-        val grokPrefix = config.grok.triggerPrefix.ifBlank { "/grok" }
         val dsPrompt = commandArgument(msg, dsPrefix) ?: commandArgument(msg, "/chat")
-        val grokPrompt = commandArgument(msg, grokPrefix)
         val dotaPrompt = commandArgument(msg, "/dota") ?: commandArgument(msg, "/d2") ?: compactDotaCommand(msg)
 
         if (dsPrompt != null) {
             kotlinx.coroutines.withContext(AgentTrace.create("chat_ds", target.platformId.value, config.diagnostics)) {
-                handleChatCommand(dsPrompt, baseKey, target, replyMsgId, provider = "ds", usage = "用法: $dsPrefix <问题>")
-            }
-        } else if (grokPrompt != null) {
-            kotlinx.coroutines.withContext(AgentTrace.create("chat_grok", target.platformId.value, config.diagnostics)) {
-                handleChatCommand(grokPrompt, baseKey.copy(targetId = "${baseKey.targetId}|grok"), target, replyMsgId, provider = "grok", usage = "用法: $grokPrefix <问题>")
+                handleChatCommand(dsPrompt, baseKey, target, replyMsgId, usage = "用法: $dsPrefix <问题>")
             }
         } else if (dotaPrompt != null) {
             handleDotaCommand(dotaPrompt, target, senderId, replyMsgId)
         } else if (msg.isNotBlank()) {
             val botId = ctx.message.botAccountId
-            if (botId != null && ctx.message.mentions.contains(botId)) {
-                when {
-                    config.chatAtAvailable("grok") ->
-                        handleChat(msg, baseKey.copy(targetId = "${baseKey.targetId}|grok"), target, replyMsgId, provider = "grok")
-                    config.chatAtAvailable("ds") ->
-                        handleChat(msg, baseKey, target, replyMsgId, provider = "ds")
-                }
+            if (botId != null && ctx.message.mentions.contains(botId) && config.chatAtAvailable()) {
+                handleChat(msg, baseKey, target, replyMsgId)
             }
         }
     }
@@ -120,10 +101,9 @@ class MessageListener(
         sessionKey: SessionManager.SessionKey,
         target: TargetAddress,
         replyMsgId: String,
-        provider: String,
         usage: String,
     ) {
-        config.chatCommandUnavailable(provider)?.let {
+        config.chatCommandUnavailable()?.let {
             sendText(target, it, replyMsgId)
             return
         }
@@ -136,7 +116,7 @@ class MessageListener(
             sendText(target, usage, replyMsgId)
             return
         }
-        handleChat(prompt, sessionKey, target, replyMsgId, provider)
+        handleChat(prompt, sessionKey, target, replyMsgId)
     }
 
     private suspend fun handleChat(
@@ -144,17 +124,9 @@ class MessageListener(
         sessionKey: SessionManager.SessionKey,
         target: TargetAddress,
         replyMsgId: String,
-        provider: String = "ds",
     ) {
-        pluginContext.launchChatReply(target, replyMsgId, AgentTrace.create("chat_$provider", target.platformId.value, config.diagnostics)) {
-            val options = if (provider == "grok") {
-                if (!config.grok.enabled || grokClient == null || config.grok.apiKey.isBlank()) {
-                    return@launchChatReply listOf(MessageBatch(listOf(MessageContent.Text("Grok 未启用或未配置 API Key"))))
-                }
-                ChatService.ChatOptions(grokClient, config.grok.model,
-                    config.grok.systemPrompt.ifBlank { config.chat.systemPrompt }, enableWebSearch = false)
-            } else null
-            val result = chatService.chat(prompt, sessionKey, options)
+        pluginContext.launchChatReply(target, replyMsgId, AgentTrace.create("chat_ds", target.platformId.value, config.diagnostics)) {
+            val result = chatService.chat(prompt, sessionKey)
             prepareChatReply(result.content, config.chat.textReplyThreshold, imageConfig, fontRegistry, cacheUtils, platformId = target.platformId.value)
         }
     }

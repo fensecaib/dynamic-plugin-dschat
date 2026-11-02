@@ -26,7 +26,7 @@ class Dota2ShortcutsTest {
     @Test fun `all shortcuts translate to existing subcommands with their arguments`() {
         for ((token, command) in expected) {
             assertEquals("$command 9044880093", compactDotaCommand("/$token 9044880093"), token)
-            assertEquals("$command 176496411 2", compactDotaCommand("/$token  176496411 2  "), token)
+            assertEquals("$command 100000001 2", compactDotaCommand("/$token  100000001 2  "), token)
         }
     }
 

@@ -33,13 +33,13 @@ class FeatureDispatchTest {
     @Test fun `host command entry rejects paused features before any background work or requests`() = withFixture { f ->
         val paused = f.config.copy(chat = ChatConfig(enabled = false), dota2 = Dota2Config(enabled = false))
         val handlers = f.handlers(paused)
-        assertEquals(listOf("ds", "grok", "dota", "dota绑定", "dota历史", "dota战报", "dota深报", "dota分析", "dota详情", "dota深详", "dota帮助"),
+        assertEquals(listOf("ds", "dota", "dota绑定", "dota历史", "dota战报", "dota深报", "dota分析", "dota详情", "dota深详", "dota帮助"),
             handlers.map { it.spec.path.single() })
-        for ((name, args) in listOf("ds" to listOf("https://example.com"), "grok" to listOf("问题"), "dota" to listOf("绑定", "176496411"))) {
+        for ((name, args) in listOf("ds" to listOf("https://example.com"), "dota" to listOf("绑定", "100000001"))) {
             assertContains(f.command(handlers, name, args).rejectedText(), "暂停")
         }
         val listener = f.listener(paused)
-        for (text in listOf("/ds https://example.com", "/grok 问题", "/dota 绑定 176496411")) {
+        for (text in listOf("/ds https://example.com", "/dota 绑定 100000001")) {
             f.sent.clear()
             listener.handle(f.incoming(text))
             assertContains(f.sent.single(), "暂停")
@@ -60,7 +60,6 @@ class FeatureDispatchTest {
                 assertContains(result.rejectedText(), "DeepSeek API Key", message = command)
             }
         }
-        assertContains(f.command(handlers, "grok", listOf("问题")).rejectedText(), "Grok")
         f.assertNoWork()
     }
 
@@ -88,16 +87,16 @@ class FeatureDispatchTest {
     @Test fun `Dota binding and history work with chat paused and no DeepSeek credentials`() = withFixture { f ->
         val config = f.config.copy(chat = ChatConfig(enabled = false))
         val handlers = f.handlers(config)
-        assertContains(f.command(handlers, "dota", listOf("绑定", "176496411")).text(), "已绑定")
-        assertEquals(176496411L, f.dota.getBinding("user"))
+        assertContains(f.command(handlers, "dota", listOf("绑定", "100000001")).text(), "已绑定")
+        assertEquals(100000001L, f.dota.getBinding("user"))
         assertContains(f.command(handlers, "dota", listOf("历史")).text(), "未找到对局记录")
         val listener = f.listener(config)
-        listener.handle(f.incoming("/dota 绑定 176496411"))
+        listener.handle(f.incoming("/dota 绑定 100000001"))
         listener.handle(f.incoming("/d2 历史"))
         assertEquals(4, f.paths.size)
         assertTrue(f.paths.all { it.startsWith("/opendota/players/") })
         assertEquals(0, f.dispatcher.launches)
-        assertEquals(listOf("已绑定: Test Player (ID=176496411)", "未找到对局记录"), f.sent)
+        assertEquals(listOf("已绑定: Test Player (ID=100000001)", "未找到对局记录"), f.sent)
     }
 
     @Test fun `Dota subfeature pauses take precedence even when API is configured`() = withFixture { f ->
@@ -105,9 +104,9 @@ class FeatureDispatchTest {
         val handlers = f.handlers(config)
         val listener = f.listener(config)
         for (command in listOf("绑定", "历史") + analysisCommands) {
-            assertContains(f.command(handlers, "dota", listOf(command, "176496411")).rejectedText(), "暂停", message = command)
+            assertContains(f.command(handlers, "dota", listOf(command, "100000001")).rejectedText(), "暂停", message = command)
             f.sent.clear()
-            listener.handle(f.incoming("/dota $command 176496411"))
+            listener.handle(f.incoming("/dota $command 100000001"))
             assertContains(f.sent.single(), "暂停", message = command)
         }
         f.assertNoWork()
@@ -123,9 +122,9 @@ class FeatureDispatchTest {
             val handlers = f.handlers(config)
             val listener = f.listener(config)
             for (shortcut in shortcuts) {
-                val legacy = f.command(handlers, "dota", listOf(shortcut.command, "176496411")).rejectedText()
-                assertEquals(legacy, f.command(handlers, shortcut.token, listOf("176496411")).rejectedText(), shortcut.token)
-                for (text in listOf("/dota ${shortcut.command} 176496411", "/${shortcut.token} 176496411")) {
+                val legacy = f.command(handlers, "dota", listOf(shortcut.command, "100000001")).rejectedText()
+                assertEquals(legacy, f.command(handlers, shortcut.token, listOf("100000001")).rejectedText(), shortcut.token)
+                for (text in listOf("/dota ${shortcut.command} 100000001", "/${shortcut.token} 100000001")) {
                     f.sent.clear()
                     listener.handle(f.incoming(text))
                     assertEquals(listOf(legacy), f.sent, text)
@@ -145,7 +144,7 @@ class FeatureDispatchTest {
         f.sent.clear()
         assertTrue(f.paths.isEmpty())
         for ((shortcut, command) in listOf("dota绑定" to "绑定", "dota历史" to "历史")) {
-            val args = if (command == "绑定") listOf("176496411") else emptyList()
+            val args = if (command == "绑定") listOf("100000001") else emptyList()
             val legacy = f.command(handlers, "dota", listOf(command) + args).text()
             assertEquals(legacy, f.command(handlers, shortcut, args).text())
             for (text in listOf("/dota $command ${args.joinToString(" ")}", "/$shortcut ${args.joinToString(" ")}")) {
@@ -154,7 +153,7 @@ class FeatureDispatchTest {
                 assertEquals(listOf(legacy), f.sent)
             }
         }
-        assertEquals(176496411L, f.dota.getBinding("user"))
+        assertEquals(100000001L, f.dota.getBinding("user"))
         assertEquals(8, f.paths.size)
         assertTrue(f.paths.all { it.startsWith("/opendota/players/") })
         assertEquals(0, f.dispatcher.launches)
@@ -162,7 +161,7 @@ class FeatureDispatchTest {
 
     @Test fun `full analysis rejects invalid ids explicitly in both command forms and listener`() = withFixture { f ->
         val config = f.config.copy(api = f.config.api.copy(apiKey = "local-test"))
-        f.dota.setBinding("user", 176496411)
+        f.dota.setBinding("user", 100000001)
         val handlers = f.handlers(config)
         val listener = f.listener(config)
         for (argument in listOf("abc", "-1", "0")) {
@@ -185,7 +184,7 @@ class FeatureDispatchTest {
             assertContains(f.command(handlers, "dota分析", listOf("9044880093")).rejectedText(), "先绑定")
             listener.handle(f.incoming("/dota分析 9044880093"))
             assertContains(f.sent.single(), "先绑定")
-            f.dota.setBinding("user", 176496411)
+            f.dota.setBinding("user", 100000001)
             assertContains(f.command(handlers, "dota", listOf("分析", "9044880093")).rejectedText(), "报告生成中")
             assertContains(f.command(handlers, "dota分析", listOf("9044880093")).rejectedText(), "报告生成中")
             for (text in listOf("/dota 分析 9044880093", "/dota分析 9044880093")) {
@@ -220,69 +219,63 @@ class FeatureDispatchTest {
         assertEquals(8, f.paths.size)
     }
 
-    @Test fun `DeepSeek command and mention switches are independent and Dota can stay paused`() = withFixture { f ->
-        val enabled = f.config.copy(api = f.config.api.copy(apiKey = "local-test"), dota2 = Dota2Config(enabled = false))
+    @Test fun `custom DeepSeek command and mention switches are independent and Dota can stay paused`() = withFixture { f ->
+        val enabled = f.config.copy(
+            api = f.config.api.copy(apiKey = "local-test"),
+            trigger = f.config.trigger.copy(triggerPrefix = "/ask"),
+            dota2 = Dota2Config(enabled = false),
+        )
         val onlyCommand = enabled.copy(trigger = enabled.trigger.copy(enableAtTrigger = false))
         val listener = f.listener(onlyCommand)
         listener.handle(f.incoming("https://example.com", mention = true))
-        assertEquals(0, f.dispatcher.launches)
         listener.handle(f.incoming("/ds 问题"))
+        listener.handle(f.incoming("/asker 问题"))
+        assertEquals(0, f.dispatcher.launches)
+        listener.handle(f.incoming("/ask 问题"))
         assertEquals(1, f.dispatcher.launches)
-        assertContains(f.command(f.handlers(onlyCommand), "dota", listOf("历史")).rejectedText(), "暂停")
+        val handlers = f.handlers(onlyCommand)
+        assertEquals(listOf(listOf("chat")), handlers.single { it.spec.path == listOf("ask") }.spec.aliases)
+        f.command(handlers, "ask", listOf("问题"))
+        assertEquals(2, f.dispatcher.launches)
+        assertContains(f.command(handlers, "dota", listOf("历史")).rejectedText(), "暂停")
 
         val onlyAt = enabled.copy(trigger = enabled.trigger.copy(enableAtTrigger = true, enableCommandTrigger = false))
-        assertContains(f.command(f.handlers(onlyAt), "ds", listOf("clear")).rejectedText(), "命令对话已暂停")
-        f.listener(onlyAt).handle(f.incoming("/ds 问题"))
-        assertEquals(1, f.dispatcher.launches)
-        f.listener(onlyAt).handle(f.incoming("问题", mention = true))
+        assertContains(f.command(f.handlers(onlyAt), "ask", listOf("clear")).rejectedText(), "命令对话已暂停")
+        f.listener(onlyAt).handle(f.incoming("/ask 问题"))
         assertEquals(2, f.dispatcher.launches)
+        f.listener(onlyAt).handle(f.incoming("问题", mention = true))
+        assertEquals(3, f.dispatcher.launches)
         assertTrue(f.paths.isEmpty())
     }
 
-    @Test fun `Grok uses its own credentials and command switch without requiring DeepSeek`() = withFixture { f ->
-        val grok = f.config.copy(grok = GrokConfig(enabled = true, apiKey = "local-grok", apiUrl = f.modelUrl, useAsAtTrigger = true, enableCommandTrigger = false))
-        val handlers = f.handlers(grok)
-        assertContains(f.command(handlers, "grok", listOf("问题")).rejectedText(), "命令对话已暂停")
-        val listener = f.listener(grok)
-        listener.handle(f.incoming("/grok 问题"))
-        assertEquals(0, f.dispatcher.launches)
-        listener.handle(f.incoming("问题", mention = true))
-        assertEquals(1, f.dispatcher.launches)
-
-        val commandEnabled = grok.copy(grok = grok.grok.copy(enableCommandTrigger = true, useAsAtTrigger = false))
-        f.command(f.handlers(commandEnabled), "grok", listOf("问题"))
-        assertEquals(2, f.dispatcher.launches)
-        f.listener(commandEnabled).handle(f.incoming("问题", mention = true))
-        assertEquals(2, f.dispatcher.launches) // DS remains unavailable; Grok is not selected for @.
-
-        f.sent.clear()
-        val noGrokKey = grok.copy(grok = grok.grok.copy(apiKey = "", enableCommandTrigger = true))
-        f.listener(noGrokKey).handle(f.incoming("/grok 问题"))
-        assertContains(f.sent.single(), "Grok API Key")
-        f.listener(noGrokKey).handle(f.incoming("问题", mention = true))
-        assertEquals(2, f.dispatcher.launches)
-        assertTrue(f.paths.isEmpty())
+    @Test fun `removed provider has no registered command and old messages do not start chat`() = withFixture { f ->
+        val config = f.config.copy(api = f.config.api.copy(apiKey = "local-test"))
+        val handlers = f.handlers(config)
+        assertFalse(handlers.any { it.spec.path == listOf("grok") || listOf("grok") in it.spec.aliases })
+        val listener = f.listener(config)
+        for (text in listOf("/grok", "/grok 问题", "/grok clear")) {
+            listener.handle(f.incoming(text))
+        }
+        assertTrue(f.sent.isEmpty())
+        f.assertNoWork()
     }
 
     @Test fun `previously registered host handlers follow newly applied feature settings`() = withFixture { f ->
         var current = f.handlers(f.config).associateBy { it.spec.path.single() }
         val registered = current.mapValues { (name, handler) -> LiveCommandHandler(handler.spec) { current.getValue(name) } }
         val oldDs = registered.getValue("ds")
-        val oldGrok = registered.getValue("grok")
         val oldDota = registered.getValue("dota")
         assertContains(oldDs.handle(f.invocation("ds", listOf("问题"))).rejectedText(), "DeepSeek API Key")
 
-        val enabled = f.config.copy(api = f.config.api.copy(apiKey = "local-test"), grok = GrokConfig(enabled = true, apiKey = "local-grok", apiUrl = f.modelUrl))
+        val enabled = f.config.copy(api = f.config.api.copy(apiKey = "local-test"))
         current = f.handlers(enabled).associateBy { it.spec.path.single() }
         oldDs.handle(f.invocation("ds", listOf("问题")))
-        oldGrok.handle(f.invocation("grok", listOf("问题")))
-        assertEquals(2, f.dispatcher.launches)
+        assertEquals(1, f.dispatcher.launches)
 
         current = f.handlers(enabled.copy(chat = enabled.chat.copy(enabled = false), dota2 = enabled.dota2.copy(enabled = false))).associateBy { it.spec.path.single() }
         assertContains(oldDs.handle(f.invocation("ds", listOf("问题"))).rejectedText(), "暂停")
-        assertContains(oldGrok.handle(f.invocation("grok", listOf("问题"))).rejectedText(), "暂停")
-        assertContains(oldDota.handle(f.invocation("dota", listOf("绑定", "176496411"))).rejectedText(), "暂停")
-        assertEquals(2, f.dispatcher.launches)
+        assertContains(oldDota.handle(f.invocation("dota", listOf("绑定", "100000001"))).rejectedText(), "暂停")
+        assertEquals(1, f.dispatcher.launches)
         assertTrue(f.paths.isEmpty())
     }
 
@@ -318,7 +311,7 @@ class FeatureDispatchTest {
                 exchange.requestBody.readBytes()
                 val body = when {
                     path == "/model" -> "private-upstream-body"
-                    path.startsWith("/opendota/matches/") -> """{"match_id":9044880093,"radiant_win":true,"players":[{"account_id":176496411,"hero_id":0,"isRadiant":true},{"account_id":2,"hero_id":0,"isRadiant":false}]}"""
+                    path.startsWith("/opendota/matches/") -> """{"match_id":9044880093,"radiant_win":true,"players":[{"account_id":100000001,"hero_id":0,"isRadiant":true},{"account_id":2,"hero_id":0,"isRadiant":false}]}"""
                     path.endsWith("/recentMatches") -> "[]"
                     else -> """{"profile":{"personaname":"Test Player"}}"""
                 }
@@ -337,7 +330,7 @@ class FeatureDispatchTest {
         private val target = TargetAddress.of("qq", TargetKind.GROUP, "group")
         private val context = PluginContext(
             pluginId = "feature-test",
-            descriptor = PluginDescriptor(id = "feature-test", name = "test", version = "test", mainClass = "test", apiVersion = "3.0.0"),
+            descriptor = PluginDescriptor(id = "feature-test", name = "test", version = "test", mainClass = "test", apiVersion = "4.0.0"),
             configService = unused(), dataStore = unused(), scope = CoroutineScope(job + dispatcher),
             taskScheduler = unused(), sourceUpdatePublisher = unused(), sourceStateStore = unused(), subscriptionQueryService = unused(),
             messagePublisher = object : PluginMessagePublisher {
@@ -352,15 +345,13 @@ class FeatureDispatchTest {
         fun handlers(config: AgentPluginConfig): List<CommandHandler> {
             val sessions = SessionManager(config.chat)
             val ds = DeepSeekClient(config.api.apiKey, config.api.apiUrl, maxRetries = config.api.maxRetries)
-            val grok = config.grok.takeIf { it.enabled && it.apiKey.isNotBlank() }?.let { DeepSeekClient(it.apiKey, it.apiUrl) }
-            return CommandHandlers(config, ChatService(config, ds, sessions), sessions, dota, ds, grok, config.image, context, cache, fonts).all()
+            return CommandHandlers(config, ChatService(config, ds, sessions), sessions, dota, ds, config.image, context, cache, fonts).all()
         }
 
         fun listener(config: AgentPluginConfig): MessageListener {
             val sessions = SessionManager(config.chat)
             val ds = DeepSeekClient(config.api.apiKey, config.api.apiUrl, maxRetries = config.api.maxRetries)
-            val grok = config.grok.takeIf { it.enabled && it.apiKey.isNotBlank() }?.let { DeepSeekClient(it.apiKey, it.apiUrl) }
-            return MessageListener(config, ChatService(config, ds, sessions), sessions, dota, ds, grok, config.image, context, dir, cache, fonts)
+            return MessageListener(config, ChatService(config, ds, sessions), sessions, dota, ds, config.image, context, cache, fonts)
         }
 
         suspend fun command(handlers: List<CommandHandler>, name: String, args: List<String>) = handlers.single { it.spec.path == listOf(name) }.handle(invocation(name, args))
@@ -382,7 +373,7 @@ class FeatureDispatchTest {
 
         fun prepareAnalysisFailure(status: Int): AgentPluginConfig {
             modelStatus = status
-            dota.setBinding("user", 176496411)
+            dota.setBinding("user", 100000001)
             fun field(name: String, value: Any) = Dota2Service::class.java.getDeclaredField(name).apply { isAccessible = true }.set(dota, value)
             field("heroConstantsLoaded", true)
             field("itemConstantsLoaded", true)

@@ -1,6 +1,10 @@
 package top.colter.dynamic.agent.config
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
+import top.colter.dynamic.core.config.MutableConfigDocument
+import java.lang.reflect.Proxy
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -16,7 +20,6 @@ class AgentConfigMigrationTest {
                 chat = ChatConfig(enabled = false),
                 trigger = TriggerConfig(enableAtTrigger = false),
                 dota2 = Dota2Config(enableAnalysis = false),
-                grok = GrokConfig(enabled = true, model = "vendor-model"),
                 diagnostics = DiagnosticsConfig(enabled = false, slowStageWarningSeconds = 20),
             )
             val migrated = normalizeAgentConfig(previous)
@@ -62,7 +65,7 @@ class AgentConfigMigrationTest {
     }
 
     @Test
-    fun `old stored config adds diagnostics and independent provider request controls`() {
+    fun `old stored config adds diagnostics and request controls`() {
         val old = Json.decodeFromString<AgentPluginConfig>(
             """{"api":{"apiKey":"existing-key","model":"deepseek-v4-flash"},"chat":{"enabled":false},"dota2":{"enableBinding":false}}""",
         )
@@ -71,8 +74,6 @@ class AgentConfigMigrationTest {
         assertEquals("existing-key", migrated.api.apiKey)
         assertEquals(120, migrated.api.requestTimeoutSeconds)
         assertEquals(2, migrated.api.maxRetries)
-        assertEquals(120, migrated.grok.requestTimeoutSeconds)
-        assertEquals(2, migrated.grok.maxRetries)
         assertTrue(migrated.diagnostics.enabled)
         assertEquals(30, migrated.diagnostics.slowStageWarningSeconds)
         assertEquals(72, migrated.image.drawCacheRetentionHours)
@@ -84,22 +85,90 @@ class AgentConfigMigrationTest {
     fun `new request and diagnostic settings survive a config save and reload independently`() {
         val config = AgentPluginConfig(
             api = ApiConfig(model = "custom", requestTimeoutSeconds = 60, maxRetries = 0),
-            grok = GrokConfig(requestTimeoutSeconds = 180, maxRetries = 1),
             diagnostics = DiagnosticsConfig(enabled = false, slowStageWarningSeconds = 15),
         )
         assertEquals(config, Json.decodeFromString<AgentPluginConfig>(Json.encodeToString(AgentPluginConfig.serializer(), config)))
     }
 
     @Test
-    fun `model migration leaves trigger conflict resolution to the plugin`() {
-        val config = AgentPluginConfig(
-            api = ApiConfig(model = "deepseek-v4-flash"),
-            grok = GrokConfig(enabled = true, useAsAtTrigger = true),
-            trigger = TriggerConfig(enableAtTrigger = true),
-        )
-        val migrated = normalizeAgentConfig(config)
-        assertTrue(migrated.trigger.enableAtTrigger)
-        assertTrue(migrated.grok.useAsAtTrigger)
+    fun `retired provider settings decode without changing saved choices and cannot be encoded again`() {
+        val saveJson = Json { encodeDefaults = true }
+        for (enableAtTrigger in listOf(false, true)) {
+            val saved = """{
+                "api":{"apiKey":"existing-key","model":"deepseek-v4-flash"},
+                "trigger":{"enableAtTrigger":$enableAtTrigger,"enableCommandTrigger":false},
+                "grok":{"enabled":true,"apiKey":"retired-grok-key","useAsAtTrigger":true,"triggerPrefix":"/grok"},
+                "webSearch":{"enabled":false,"maxRounds":8,"totalTimeoutSeconds":120,"finalizeTimeoutSeconds":45,"searchTimeout":25,"fetchTimeout":20,"fetchMaxChars":12345,"tavilyApiKey":"retired-tavily-key"}
+            }"""
+            // Use strict default JSON so compatibility does not depend on host decoder options.
+            val migrated = normalizeAgentConfig(Json.decodeFromString<AgentPluginConfig>(saved))
+            assertEquals(enableAtTrigger, migrated.trigger.enableAtTrigger)
+            assertFalse(migrated.trigger.enableCommandTrigger)
+            assertFalse(migrated.webSearch.enabled)
+            assertEquals("", migrated.webSearch.officialApiKey)
+            assertFalse(migrated.webSearch.fallbackEnabled)
+            assertEquals("existing-key", migrated.api.apiKey)
+            assertEquals("deepseek-flash", migrated.api.model)
+            val encoded = saveJson.encodeToString(AgentPluginConfig.serializer(), migrated)
+            val encodedRoot = Json.parseToJsonElement(encoded).jsonObject
+            assertFalse("grok" in encodedRoot)
+            assertFalse("tavilyApiKey" in encodedRoot.getValue("webSearch").jsonObject)
+            assertEquals(setOf("enabled", "officialApiKey", "fallbackEnabled"), encodedRoot.getValue("webSearch").jsonObject.keys)
+            assertFalse(encoded.contains("retired-grok-key"))
+            assertFalse(encoded.contains("retired-tavily-key"))
+            assertEquals(migrated, Json.decodeFromString<AgentPluginConfig>(encoded))
+        }
+    }
+
+    @Test
+    fun `host migration removes only declared retired paths while preserving valid and unknown fields`() {
+        for (enableAtTrigger in listOf(false, true)) {
+            val fixture = MigrationDocumentFixture(
+                """{
+                    "api":{"apiKey":"existing-key","model":"deepseek-flash"},
+                    "trigger":{"enableAtTrigger":$enableAtTrigger,"enableCommandTrigger":false},
+                    "grok":{"apiKey":"retired-grok-key","useAsAtTrigger":true},
+                    "webSearch":{"enabled":false,"officialApiKey":"official-search-key","fallbackEnabled":true,"maxRounds":2,"totalTimeoutSeconds":180,"finalizeTimeoutSeconds":60,"searchTimeout":30,"fetchTimeout":15,"fetchMaxChars":8000,"tavilyApiKey":"retired-tavily-key","customSetting":"keep-nested"},
+                    "customRoot":{"grok":"keep-custom","tavilyApiKey":"keep-custom-key"},
+                    "webSearch.tavilyApiKey":"keep-literal-dotted-key"
+                }""",
+            )
+            val expected = Json.parseToJsonElement(
+                """{
+                    "api":{"apiKey":"existing-key","model":"deepseek-flash"},
+                    "trigger":{"enableAtTrigger":$enableAtTrigger,"enableCommandTrigger":false},
+                    "webSearch":{"enabled":false,"officialApiKey":"official-search-key","fallbackEnabled":true,"customSetting":"keep-nested"},
+                    "customRoot":{"grok":"keep-custom","tavilyApiKey":"keep-custom-key"},
+                    "webSearch.tavilyApiKey":"keep-literal-dotted-key"
+                }""",
+            )
+            repeat(2) {
+                agentConfigMigrations.forEach { it.apply(fixture.document) }
+                assertEquals(expected, fixture.root)
+            }
+        }
+    }
+
+    @Test
+    fun `search defaults use the official chain with backup opt in`() {
+        val old = Json.decodeFromString<AgentPluginConfig>("""{"webSearch":{"enabled":true,"maxRounds":3}}""")
+        assertEquals(WebSearchConfig(), old.webSearch)
+        assertTrue(old.webSearch.enabled)
+        assertFalse(old.webSearch.fallbackEnabled)
+        assertEquals("", old.webSearch.officialApiKey)
+
+        val configured = old.copy(webSearch = WebSearchConfig(enabled = false, officialApiKey = "official-key", fallbackEnabled = true))
+        assertEquals(configured, Json.decodeFromString<AgentPluginConfig>(Json.encodeToString(AgentPluginConfig.serializer(), configured)))
+    }
+
+    @Test
+    fun `nested retired field migration is a no-op when its parent is absent or not an object`() {
+        for (saved in listOf("{}", """{"webSearch":null}""", """{"webSearch":"keep-invalid-value"}""")) {
+            val fixture = MigrationDocumentFixture(saved)
+            val original = fixture.root
+            repeat(2) { agentConfigMigrations.forEach { it.apply(fixture.document) } }
+            assertEquals(original, fixture.root)
+        }
     }
 
     @Test
@@ -124,6 +193,33 @@ class AgentConfigMigrationTest {
             val reloaded = Json.decodeFromString<AgentPluginConfig>(saved)
             assertEquals(config.image, reloaded.image)
             assertEquals(hours, normalizeAgentConfig(reloaded).image.drawCacheRetentionHours)
+        }
+    }
+
+    /** Minimal host document fixture: dotted paths traverse objects and never match literal dotted keys. */
+    private class MigrationDocumentFixture(saved: String) {
+        var root: JsonObject = Json.parseToJsonElement(saved).jsonObject
+            private set
+
+        val document: MutableConfigDocument = Proxy.newProxyInstance(
+            MutableConfigDocument::class.java.classLoader, arrayOf(MutableConfigDocument::class.java),
+        ) { _, method, args ->
+            check(method.name == "remove") { "Unexpected migration operation: ${method.name}" }
+            val (updated, removed) = remove(root, (args.single() as String).split("."))
+            root = updated
+            removed
+        } as MutableConfigDocument
+
+        private fun remove(node: JsonObject, segments: List<String>): Pair<JsonObject, Boolean> {
+            val key = segments.first()
+            if (segments.size == 1) {
+                if (key !in node) return node to false
+                return JsonObject(node - key) to true
+            }
+            val child = node[key] as? JsonObject ?: return node to false
+            val (updated, removed) = remove(child, segments.drop(1))
+            if (!removed) return node to false
+            return JsonObject(node + (key to updated)) to true
         }
     }
 }
