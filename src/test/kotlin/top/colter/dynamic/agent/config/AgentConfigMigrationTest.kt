@@ -12,6 +12,29 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class AgentConfigMigrationTest {
+    @Test fun `reserved Pro prefixes migrate without changing other settings and remain idempotent`() {
+        for (prefix in listOf("/dspro", "/DSPRO", "DsPro", " /dspro ", "/pro", "/PRO", "pro")) {
+            val previous = AgentPluginConfig(api = ApiConfig(model = "custom-model"),
+                trigger = TriggerConfig(triggerPrefix = prefix, enableAtTrigger = false, enableCommandTrigger = false))
+            val migrated = normalizeAgentConfig(previous)
+            assertEquals(previous.copy(trigger = previous.trigger.copy(triggerPrefix = "/ds")), migrated, prefix)
+            assertSame(migrated, normalizeAgentConfig(migrated))
+            val restored = Json.decodeFromString<AgentPluginConfig>(Json.encodeToString(AgentPluginConfig.serializer(), migrated))
+            assertEquals(migrated, normalizeAgentConfig(restored))
+        }
+        for (prefix in listOf("/ds", "/ask", "/dsproextra", "!ask")) {
+            val config = AgentPluginConfig(trigger = TriggerConfig(triggerPrefix = prefix))
+            assertSame(config, normalizeAgentConfig(config))
+        }
+    }
+
+    @Test fun `model and prefix migrations apply together`() {
+        val config = AgentPluginConfig(api = ApiConfig(model = "deepseek-v4-flash"), trigger = TriggerConfig(triggerPrefix = "/DSPRO"))
+        val migrated = normalizeAgentConfig(config)
+        assertEquals("deepseek-flash", migrated.api.model)
+        assertEquals("/ds", migrated.trigger.triggerPrefix)
+    }
+
     @Test
     fun `legacy official Flash model aliases migrate without changing any other settings`() {
         for (alias in listOf("deepseek-v4-flash", "deepseek-v4-flash-vision-exp")) {

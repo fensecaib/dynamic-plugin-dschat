@@ -10,9 +10,9 @@ internal val agentConfigFormSpec = ConfigFormSpec(
     title = "多功能 Agent 插件配置",
     fields = listOf(
         ConfigFieldSpec("chat.enabled", "启用 AI 对话", ConfigFieldType.BOOLEAN, section = "对话与触发", description = "AI 对话总开关，控制 DeepSeek 对话；Dota2 可独立启用"),
-        ConfigFieldSpec("trigger.enableCommandTrigger", "启用 DeepSeek 命令对话", ConfigFieldType.BOOLEAN, section = "对话与触发", description = "控制 DeepSeek 命令前缀（默认 /ds）及 /chat；关闭后仍可使用 Dota2 指令"),
-        ConfigFieldSpec("trigger.enableAtTrigger", "启用 DeepSeek @Bot 对话", ConfigFieldType.BOOLEAN, section = "对话与触发", description = "控制单独 @Bot 是否发起 DeepSeek 对话；@Bot /dota 指令仍可使用"),
-        ConfigFieldSpec("trigger.triggerPrefix", "DeepSeek 命令前缀", ConfigFieldType.TEXT, section = "对话与触发", description = "默认 /ds；修改后需要重启插件，其他开关保存后生效", restartRequired = true),
+        ConfigFieldSpec("trigger.enableCommandTrigger", "启用 DeepSeek 命令对话", ConfigFieldType.BOOLEAN, section = "对话与触发", description = "控制 DeepSeek 命令前缀（默认 /ds）、/dspro 及 /chat；关闭后仍可使用 Dota2 指令"),
+        ConfigFieldSpec("trigger.enableAtTrigger", "启用 DeepSeek @Bot 对话", ConfigFieldType.BOOLEAN, section = "对话与触发", description = "控制普通 @Bot 及 @Bot /pro 对话；@Bot /dota 指令仍可使用"),
+        ConfigFieldSpec("trigger.triggerPrefix", "DeepSeek 命令前缀", ConfigFieldType.TEXT, section = "对话与触发", description = "默认 /ds；/dspro、/pro 为保留入口，填写时自动恢复为 /ds；修改后需要重启插件，其他开关保存后生效", restartRequired = true),
 
         ConfigFieldSpec("dota2.enabled", "启用 Dota2 功能", ConfigFieldType.BOOLEAN, section = "Dota2 功能", description = "Dota2 总开关，控制 /dota、/d2 全部指令；与 AI 对话开关独立"),
         ConfigFieldSpec("dota2.enableBinding", "启用账号绑定", ConfigFieldType.BOOLEAN, section = "Dota2 功能", description = "控制 /dota 绑定；暂停后保留已绑定账号，无需 DeepSeek Key"),

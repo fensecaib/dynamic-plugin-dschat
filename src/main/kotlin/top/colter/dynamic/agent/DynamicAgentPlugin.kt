@@ -50,8 +50,8 @@ internal class LiveCommandHandler(
 class DynamicAgentPlugin : Plugin, IncomingMessageConsumerPlugin, CommandContributor,
     ConfigurablePlugin<AgentPluginConfig> {
 
-    // Mentioned URLs need the listener; commands remain owned by the host command dispatcher.
-    override val incomingMessageFilter = IncomingMessageFilter(receiveLinkMessages = true)
+    // The listener admits only @Bot /pro from command messages; other commands stay host-owned.
+    override val incomingMessageFilter = IncomingMessageFilter(receiveLinkMessages = true, receiveCommandMessages = true)
 
     private lateinit var context: PluginContext
     private lateinit var dataDir: Path
@@ -207,6 +207,7 @@ class DynamicAgentPlugin : Plugin, IncomingMessageConsumerPlugin, CommandContrib
             message = buildList {
                 if (prefixChanged) add("功能开关已生效；命令前缀修改需重启插件后生效")
                 if (next.api.model != normalized.api.model) add("已将官方 Flash 模型更新为 deepseek-flash")
+                if (next.trigger.triggerPrefix != normalized.trigger.triggerPrefix) add("/dspro 和 /pro 为 Pro 保留入口，默认对话前缀已恢复为 /ds")
             }.joinToString("；")
         )
     }

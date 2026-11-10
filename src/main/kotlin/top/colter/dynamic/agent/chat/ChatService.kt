@@ -5,6 +5,8 @@ import top.colter.dynamic.agent.agent.Agent
 import top.colter.dynamic.agent.config.AgentPluginConfig
 import top.colter.dynamic.agent.ds.*
 
+internal const val PRO_CHAT_MODEL = "deepseek-v4-pro"
+
 class ChatService(
     private val config: AgentPluginConfig,
     private val dsClient: DeepSeekClient,
@@ -18,8 +20,8 @@ class ChatService(
     suspend fun chat(
         prompt: String,
         sessionKey: SessionManager.SessionKey,
+        model: String = config.api.model,
     ): ChatResult {
-        val model = config.api.model
         val systemPrompt = config.chat.systemPrompt
         // Capture this conversation before waiting on the model or running its tools.
         val turn = sessionManager.beginTurn(sessionKey, prompt, systemPrompt)

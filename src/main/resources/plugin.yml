@@ -1,9 +1,9 @@
 id: dynamic-agent
 name: 多功能Agent插件
-version: 0.0.8
+version: 0.0.9
 mainClass: top.colter.dynamic.agent.DynamicAgentPlugin
 apiVersion: 4.0.0
 description: >
   DeepSeek AI 对话、Dota2 战报分析、联网搜索、微博链接渲染。
-  指令: /ds <问题> | /dota <子命令>
+  指令: /ds <问题> | /dspro <问题> | /dota <子命令>
 author: dynamic-bot

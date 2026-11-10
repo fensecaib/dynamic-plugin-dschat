@@ -10,6 +10,8 @@ import top.colter.dynamic.agent.dota2.Dota2Service
 import top.colter.dynamic.agent.dota2.dotaCommandHelp
 import top.colter.dynamic.agent.dota2.dotaShortcuts
 import top.colter.dynamic.agent.ds.DeepSeekClient
+import top.colter.dynamic.agent.ds.ChatRequest
+import top.colter.dynamic.agent.util.HttpUtils
 import top.colter.dynamic.agent.listener.MessageListener
 import top.colter.dynamic.agent.util.CacheUtils
 import top.colter.dynamic.core.command.CommandExecutionResult
@@ -24,22 +26,98 @@ import java.lang.reflect.Proxy
 import java.net.InetSocketAddress
 import java.nio.file.Files
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.CoroutineContext
 import kotlin.test.*
 
 class FeatureDispatchTest {
     private val analysisCommands = listOf("战报", "深度战报", "分析", "个人详情", "深度个人详情")
 
+    @Test fun `host Pro handler sends Pro model and default handler keeps configured model`() = runBlocking {
+        Fixture(executeTasks = true).use { f ->
+            val config = f.config.copy(api = f.config.api.copy(apiKey = "local-test", model = "custom-default"))
+            val handlers = f.handlers(config)
+            f.command(handlers, "dspro", listOf("Pro问题"))
+            withTimeout(10000) { while (f.sent.size < 1) delay(10) }
+            assertEquals("deepseek-v4-pro", f.requests.single().model)
+            f.command(handlers, "ds", listOf("普通追问"))
+            withTimeout(10000) { while (f.sent.size < 2) delay(10) }
+            assertEquals("custom-default", f.requests.last().model)
+            assertEquals(listOf("Pro问题", "测试回答", "普通追问"), f.requests.last().messages.filter { it.role != "system" }.map { it.content })
+            f.command(handlers, "dspro", listOf("clear"))
+            withTimeout(10000) { while (f.sent.size < 3) delay(10) }
+            assertEquals(2, f.requests.size)
+            f.command(handlers, "ds", listOf("新问题"))
+            withTimeout(10000) { while (f.sent.size < 4) delay(10) }
+            assertEquals(listOf("新问题"), f.requests.last().messages.filter { it.role == "user" }.map { it.content })
+        }
+    }
+
+    @Test fun `mentioned pro reaches only addressed bot and resets model on next ordinary mention`() = runBlocking {
+        Fixture(executeTasks = true).use { f ->
+            val config = f.config.copy(api = f.config.api.copy(apiKey = "local-test"),
+                trigger = f.config.trigger.copy(enableCommandTrigger = false))
+            val listener = f.listener(config)
+            val segments = listOf(IncomingMessageSegment.Mention("bot"), IncomingMessageSegment.Text(" /Pro　查一下 https://example.com"))
+            val message = f.incoming("@bot /Pro　查一下 https://example.com", mention = true, segments = segments)
+                .copy(intent = IncomingMessageIntent.Command)
+            listener.handle(f.incoming(message.rawText, mention = true, botId = "other-bot", segments = segments)
+                .copy(intent = IncomingMessageIntent.Command))
+            listener.handle(f.incoming("/pro 问题"))
+            assertEquals(0, f.dispatcher.launches)
+            listener.handle(message)
+            withTimeout(10000) { while (f.sent.size < 1) delay(10) }
+            assertEquals("deepseek-v4-pro", f.requests.single().model)
+            assertEquals("查一下 https://example.com", f.requests.single().messages.last().content)
+            assertTrue(f.requests.single().tools.orEmpty().any { it.function.name == "web_search" })
+            listener.handle(f.incoming("继续", mention = true))
+            withTimeout(10000) { while (f.sent.size < 2) delay(10) }
+            assertEquals(config.api.model, f.requests.last().model)
+            assertEquals(listOf("查一下 https://example.com", "测试回答", "继续"),
+                f.requests.last().messages.filter { it.role != "system" }.map { it.content })
+            listener.handle(f.incoming("/pro 再问", mention = true))
+            withTimeout(10000) { while (f.sent.size < 3) delay(10) }
+            assertEquals("deepseek-v4-pro", f.requests.last().model)
+            assertEquals("再问", f.requests.last().messages.last().content)
+            listener.handle(f.incoming("problem statement", mention = true))
+            withTimeout(10000) { while (f.sent.size < 4) delay(10) }
+            assertEquals(config.api.model, f.requests.last().model)
+            assertEquals("problem statement", f.requests.last().messages.last().content)
+            listener.handle(f.incoming("pro 普通文字", mention = true))
+            withTimeout(10000) { while (f.sent.size < 5) delay(10) }
+            assertEquals(config.api.model, f.requests.last().model)
+            assertEquals("pro 普通文字", f.requests.last().messages.last().content)
+        }
+    }
+
+    @Test fun `mention pro respects mention switch and empty question never starts model`() = withFixture { f ->
+        val config = f.config.copy(api = f.config.api.copy(apiKey = "local-test"))
+        f.listener(config).handle(f.incoming("/pro　", mention = true))
+        assertEquals(listOf("用法: @Bot /pro <问题>"), f.sent)
+        f.sent.clear()
+        for (disabled in listOf(
+            config.copy(trigger = config.trigger.copy(enableAtTrigger = false)),
+            config.copy(chat = config.chat.copy(enabled = false)),
+            f.config,
+        )) {
+            for (intent in listOf(IncomingMessageIntent.PlainText, IncomingMessageIntent.Command)) {
+                f.listener(disabled).handle(f.incoming("/pro 问题", mention = true).copy(intent = intent))
+            }
+        }
+        assertTrue(f.sent.isEmpty())
+        f.assertNoWork()
+    }
+
     @Test fun `host command entry rejects paused features before any background work or requests`() = withFixture { f ->
         val paused = f.config.copy(chat = ChatConfig(enabled = false), dota2 = Dota2Config(enabled = false))
         val handlers = f.handlers(paused)
-        assertEquals(listOf("ds", "dota", "dota绑定", "dota历史", "dota战报", "dota深报", "dota分析", "dota详情", "dota深详", "dota帮助"),
+        assertEquals(listOf("ds", "dspro", "dota", "dota绑定", "dota历史", "dota战报", "dota深报", "dota分析", "dota详情", "dota深详", "dota帮助"),
             handlers.map { it.spec.path.single() })
-        for ((name, args) in listOf("ds" to listOf("https://example.com"), "dota" to listOf("绑定", "100000001"))) {
+        for ((name, args) in listOf("ds" to listOf("https://example.com"), "dspro" to listOf("https://example.com"), "dota" to listOf("绑定", "100000001"))) {
             assertContains(f.command(handlers, name, args).rejectedText(), "暂停")
         }
         val listener = f.listener(paused)
-        for (text in listOf("/ds https://example.com", "/dota 绑定 100000001")) {
+        for (text in listOf("/ds https://example.com", "/dspro https://example.com", "/dota 绑定 100000001")) {
             f.sent.clear()
             listener.handle(f.incoming(text))
             assertContains(f.sent.single(), "暂停")
@@ -53,6 +131,7 @@ class FeatureDispatchTest {
     @Test fun `missing DeepSeek blocks all analysis commands before binding checks and report slots`() = withFixture { f ->
         val handlers = f.handlers(f.config)
         assertContains(f.command(handlers, "ds", listOf("https://example.com")).rejectedText(), "DeepSeek API Key")
+        assertContains(f.command(handlers, "dspro", listOf("https://example.com")).rejectedText(), "DeepSeek API Key")
         // Occupying the shared slot proves configuration is checked before the busy response too.
         f.dota.reportTasks.runIfIdle(onBusy = { fail("unexpected occupied slot") }) {
             for (command in analysisCommands) {
@@ -248,6 +327,29 @@ class FeatureDispatchTest {
         assertTrue(f.paths.isEmpty())
     }
 
+    @Test fun `pro command stays available with custom prefix and obeys command switch`() = withFixture { f ->
+        val config = f.config.copy(api = f.config.api.copy(apiKey = "local-test"),
+            trigger = f.config.trigger.copy(triggerPrefix = "/ask", enableAtTrigger = false))
+        val listener = f.listener(config)
+        listener.handle(f.incoming("/dspro"))
+        assertEquals(listOf("用法: /dspro <问题>"), f.sent)
+        f.sent.clear()
+        listener.handle(f.incoming("/dspro clear"))
+        assertContains(f.sent.single(), "上下文已清空")
+        listener.handle(f.incoming("/dsproextra 问题"))
+        assertEquals(0, f.dispatcher.launches)
+        listener.handle(f.incoming("/dspro 问题"))
+        f.command(f.handlers(config), "dspro", listOf("问题"))
+        assertEquals(2, f.dispatcher.launches)
+        val disabled = config.copy(trigger = config.trigger.copy(enableCommandTrigger = false))
+        assertContains(f.command(f.handlers(disabled), "dspro", listOf("问题")).rejectedText(), "命令对话已暂停")
+        f.sent.clear()
+        f.listener(disabled).handle(f.incoming("/dspro 问题", mention = true))
+        assertContains(f.sent.single(), "命令对话已暂停")
+        assertEquals(2, f.dispatcher.launches)
+        assertTrue(f.paths.isEmpty())
+    }
+
     @Test fun `removed provider has no registered command and old messages do not start chat`() = withFixture { f ->
         val config = f.config.copy(api = f.config.api.copy(apiKey = "local-test"))
         val handlers = f.handlers(config)
@@ -289,17 +391,22 @@ class FeatureDispatchTest {
         Fixture().use { block(it) }
     }
 
-    /** A launch is observable immediately, while its body cannot accidentally call external services. */
-    private class RecordingDispatcher : CoroutineDispatcher() {
-        var launches = 0
-        override fun dispatch(context: CoroutineContext, block: Runnable) { launches++ }
+    /** Admission-only by default; integration tests opt into executing against the local HTTP fixture. */
+    private class RecordingDispatcher(private val executeTasks: Boolean = false) : CoroutineDispatcher() {
+        private val dispatchCount = AtomicInteger()
+        val launches: Int get() = dispatchCount.get()
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            dispatchCount.incrementAndGet()
+            if (executeTasks) Dispatchers.IO.dispatch(context, block)
+        }
     }
 
-    private class Fixture : AutoCloseable {
+    private class Fixture(executeTasks: Boolean = false) : AutoCloseable {
         val paths = CopyOnWriteArrayList<String>()
-        val sent = mutableListOf<String>()
-        val sentContent = mutableListOf<MessageContent>()
-        val dispatcher = RecordingDispatcher()
+        val requests = CopyOnWriteArrayList<ChatRequest>()
+        val sent = CopyOnWriteArrayList<String>()
+        val sentContent = CopyOnWriteArrayList<MessageContent>()
+        val dispatcher = RecordingDispatcher(executeTasks)
         private val job = SupervisorJob()
         private val dir = Files.createTempDirectory("feature-dispatch-")
         private var modelStatus = 200
@@ -308,8 +415,10 @@ class FeatureDispatchTest {
             createContext("/") { exchange ->
                 val path = exchange.requestURI.path
                 paths += path
-                exchange.requestBody.readBytes()
+                val requestBody = exchange.requestBody.readBytes().toString(Charsets.UTF_8)
+                if (path == "/model") requests += HttpUtils.json.decodeFromString(ChatRequest.serializer(), requestBody)
                 val body = when {
+                    path == "/model" && modelStatus == 200 -> """{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"测试回答"}}]}"""
                     path == "/model" -> "private-upstream-body"
                     path.startsWith("/opendota/matches/") -> """{"match_id":9044880093,"radiant_win":true,"players":[{"account_id":100000001,"hero_id":0,"isRadiant":true},{"account_id":2,"hero_id":0,"isRadiant":false}]}"""
                     path.endsWith("/recentMatches") -> "[]"
@@ -361,9 +470,9 @@ class FeatureDispatchTest {
             traceId = "trace", replyToMessageId = "reply", tokens = listOf(name) + args, matchedPath = listOf(name), args = args, role = CommandRole.USER,
         )
 
-        fun incoming(text: String, mention: Boolean = false): IncomingMessageDispatchContext {
-            val message = IncomingMessage(platformId = PlatformId.of("qq"), target = target, senderId = "user", botAccountId = "bot", text = text, mentions = if (mention) setOf("bot") else emptySet())
-            return IncomingMessageDispatchContext(message = message, sourcePlugin = "test", traceId = "trace", replyToMessageId = "reply", commandContext = CommandContext(target, "user", "bot", message.mentions), rawText = text)
+        fun incoming(text: String, mention: Boolean = false, botId: String = "bot", segments: List<IncomingMessageSegment> = emptyList()): IncomingMessageDispatchContext {
+            val message = IncomingMessage(platformId = PlatformId.of("qq"), target = target, senderId = "user", botAccountId = botId, text = text, mentions = if (mention) setOf("bot") else emptySet(), segments = segments)
+            return IncomingMessageDispatchContext(message = message, sourcePlugin = "test", traceId = "trace", replyToMessageId = "reply", commandContext = CommandContext(target, "user", botId, message.mentions), rawText = text)
         }
 
         fun assertNoWork() {

@@ -2,6 +2,7 @@ package top.colter.dynamic.agent.command
 
 import org.jetbrains.skia.Image
 import top.colter.dynamic.agent.chat.ChatService
+import top.colter.dynamic.agent.chat.PRO_CHAT_MODEL
 import top.colter.dynamic.agent.chat.SessionManager
 import top.colter.dynamic.agent.config.AgentPluginConfig
 import top.colter.dynamic.agent.config.ImageConfig
@@ -69,6 +70,7 @@ class CommandHandlers(
         val dota = DotaHandler()
         buildList {
             add(DsHandler())
+            add(DsHandler(pro = true))
             add(dota)
             dotaShortcuts.forEach { add(DotaShortcutHandler(it, dota)) }
         }
@@ -92,22 +94,23 @@ class CommandHandlers(
         key: SessionManager.SessionKey,
         usage: String,
         platformId: String,
+        model: String = config.api.model,
     ): CommandExecutionResult {
         if (prompt in listOf("clear", "重置", "新建对话", "清空上下文")) {
             sessionManager.clear(key)
             return ok("上下文已清空")
         }
         if (prompt.isBlank()) return fail(usage)
-        val result = chatService.chat(prompt, key)
+        val result = chatService.chat(prompt, key, model)
         return CommandExecutionResult(CommandStatus.SUCCESS,
             prepareChatReply(result.content, config.chat.textReplyThreshold, imageConfig, fontRegistry, cacheUtils, platformId = platformId))
     }
 
-    inner class DsHandler : CommandHandler {
+    inner class DsHandler(private val pro: Boolean = false) : CommandHandler {
         override val spec = CommandSpec(
-            path = listOf(config.trigger.triggerPrefix.removePrefix("/").ifBlank { "ds" }),
-            aliases = listOf(listOf("chat")),
-            description = "DeepSeek AI对话",
+            path = listOf(if (pro) "dspro" else config.trigger.triggerPrefix.removePrefix("/").ifBlank { "ds" }),
+            aliases = if (pro) emptyList() else listOf(listOf("chat")),
+            description = if (pro) "DeepSeek Pro AI对话" else "DeepSeek AI对话",
         )
 
         override suspend fun handle(invocation: CommandInvocation): CommandExecutionResult {
@@ -116,7 +119,8 @@ class CommandHandlers(
             val key = SessionManager.SessionKey(invocation.context.target.stableValue(), invocation.context.senderId)
             pluginContext.launchChatReply(invocation.context.target.withPreferredAccount(invocation.context.botAccountId), invocation.replyToMessageId,
                 AgentTrace.create("chat_ds", invocation.context.target.platformId.value, config.diagnostics)) {
-                handleLlmChat(prompt, key, "用法: ${config.trigger.triggerPrefix.ifBlank { "/ds" }} <问题>", platformId = invocation.context.target.platformId.value).reply
+                handleLlmChat(prompt, key, "用法: ${if (pro) "/dspro" else config.trigger.triggerPrefix.ifBlank { "/ds" }} <问题>",
+                    platformId = invocation.context.target.platformId.value, model = if (pro) PRO_CHAT_MODEL else config.api.model).reply
             }
             return CommandExecutionResult(CommandStatus.SUCCESS, emptyList())
         }

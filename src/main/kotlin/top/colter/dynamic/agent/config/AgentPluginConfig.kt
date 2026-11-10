@@ -100,11 +100,16 @@ internal val agentConfigMigrations = listOf(
     },
 )
 
-/** 仅迁移 DeepSeek 官方服务的旧 Flash 别名，保留第三方供应商自己的模型命名。 */
+/** Normalize persisted settings at load/save boundaries; runtime command paths stay fixed until restart. */
 internal fun normalizeAgentConfig(config: AgentPluginConfig): AgentPluginConfig {
     val officialEndpoint = isOfficialDeepSeekEndpoint(config.api.apiUrl)
     val oldFlashAlias = config.api.model.trim() in setOf("deepseek-v4-flash", "deepseek-v4-flash-vision-exp")
-    return if (officialEndpoint && oldFlashAlias) {
+    val modelConfig = if (officialEndpoint && oldFlashAlias) {
         config.copy(api = config.api.copy(model = "deepseek-flash"))
     } else config
+    // These names now belong to fixed Pro entry points. Preserve all other trigger settings.
+    val prefix = modelConfig.trigger.triggerPrefix.trim().removePrefix("/")
+    return if (prefix.equals("dspro", ignoreCase = true) || prefix.equals("pro", ignoreCase = true)) {
+        modelConfig.copy(trigger = modelConfig.trigger.copy(triggerPrefix = "/ds"))
+    } else modelConfig
 }

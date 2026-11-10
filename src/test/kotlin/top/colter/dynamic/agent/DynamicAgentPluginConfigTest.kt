@@ -17,6 +17,7 @@ import top.colter.skiko.FontRegistry
 import java.lang.reflect.Proxy
 import java.nio.file.Files
 import kotlin.test.Test
+import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -248,6 +249,28 @@ class DynamicAgentPluginConfigTest {
         val afterRestart = disabled.copy(diagnostics = disabled.diagnostics.copy(enabled = false))
         assertFalse(plugin.applyConfig(afterRestart).restartRequired)
         fixture.assertRuntimePrefix("/ask")
+    }
+
+    @Test fun `reserved prefix save preserves active paths until restart and registers unique commands`() = withFixture { fixture ->
+        val plugin = fixture.plugin
+        plugin.applyConfig(plugin.currentConfig().let { it.copy(trigger = it.trigger.copy(triggerPrefix = "/ask")) })
+        plugin.onStop()
+        plugin.onStart()
+        fixture.assertRuntimePrefix("/ask")
+        val sessions = fixture.sessions()
+        val result = plugin.applyConfig(plugin.currentConfig().let { it.copy(trigger = it.trigger.copy(triggerPrefix = "/DSPRO")) })
+        assertTrue(result.restartRequired)
+        assertContains(result.message, "保留入口")
+        assertEquals("/ds", plugin.currentConfig().trigger.triggerPrefix)
+        fixture.assertRuntimePrefix("/ask")
+        plugin.onStop()
+        plugin.onStart()
+        fixture.assertRuntimePrefix("/ds")
+        assertSame(sessions, fixture.sessions())
+        val paths = plugin.commandHandlers().flatMap { listOf(it.spec.path) + it.spec.aliases }.map { it.map(String::lowercase) }
+        assertEquals(paths.size, paths.distinct().size)
+        assertEquals(1, paths.count { it == listOf("dspro") })
+        assertFalse(paths.contains(listOf("pro")))
     }
 
     private fun withFixture(block: suspend (Fixture) -> Unit) = runBlocking {

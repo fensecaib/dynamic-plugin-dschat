@@ -27,17 +27,16 @@ import java.nio.file.Path
 import kotlin.coroutines.CoroutineContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class IncomingMessageFilterTest {
     private val target = TargetAddress.of("qq", TargetKind.GROUP, "group")
 
-    @Test fun `link messages reach the listener while host commands remain excluded`() {
+    @Test fun `links and commands reach listener for selective mention admission`() {
         val filter = DynamicAgentPlugin().incomingMessageFilter
         assertTrue(filter.matches(incoming(IncomingMessageIntent.LinkText)))
         assertTrue(filter.matches(incoming(IncomingMessageIntent.PlainText)))
-        assertFalse(filter.matches(incoming(IncomingMessageIntent.Command, text = "/ds 问题")))
+        assertTrue(filter.matches(incoming(IncomingMessageIntent.Command, text = "/pro 问题", mention = true)))
     }
 
     @Test fun `only mentioned links start chat after passing the real plugin filter`() = runBlocking {
@@ -70,6 +69,13 @@ class IncomingMessageFilterTest {
             assertEquals(0, dispatcher.launches, "Commands are handled by the registered host handler")
             dispatch(incoming(IncomingMessageIntent.LinkText, mention = true))
             assertEquals(1, dispatcher.launches, "A mentioned link must reach chat admission")
+            dispatch(incoming(IncomingMessageIntent.Command, text = "/pro 问题"))
+            dispatch(incoming(IncomingMessageIntent.Command, text = "/dota 帮助", mention = true))
+            dispatch(incoming(IncomingMessageIntent.Command, text = "/dspro 问题", mention = true))
+            dispatch(incoming(IncomingMessageIntent.Command, text = "/proextra 问题", mention = true))
+            assertEquals(1, dispatcher.launches, "Other commands and unmentioned /pro must not start chat")
+            dispatch(incoming(IncomingMessageIntent.Command, text = "/pro 问题", mention = true))
+            assertEquals(2, dispatcher.launches, "Mentioned /pro must work even when classified as Command")
         } finally {
             job.cancel()
         }
