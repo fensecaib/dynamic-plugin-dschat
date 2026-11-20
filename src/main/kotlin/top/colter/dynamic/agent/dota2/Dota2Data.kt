@@ -72,4 +72,7 @@ data class Dota2PlayerCard(
     val isMvp: Boolean = false,
     val isSvp: Boolean = false,
     val isCriminal: Boolean = false,
+    // 与图标按槽位对应：0..5 为主装备，6 为中立物品。图标缺失时仍可识别已装备的物品。
+    val itemIds: List<Int> = emptyList(),
+    val backpackIds: List<Int> = emptyList(),
 )

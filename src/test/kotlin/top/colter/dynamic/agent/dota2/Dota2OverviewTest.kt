@@ -60,6 +60,20 @@ class Dota2OverviewTest {
         assertTrue(empty.representatives.isEmpty());assertNull(empty.average("deaths").value)
     }
 
+    @Test fun `partial detail uses the known recent side and result`() {
+        val match = detail(1)
+        val player = match.getValue("players").jsonArray.single().jsonObject
+        val partial = JsonObject(match + mapOf(
+            "radiant_win" to JsonNull,
+            "players" to JsonArray(listOf(JsonObject(player - "player_slot")))
+        ))
+        val recent = JsonObject(row(1) + ("player_slot" to JsonPrimitive(128)))
+        val s = buildOverviewSnapshot(1, null, JsonArray(listOf(recent)), mapOf(1L to partial), ::localizedDota2HeroName)
+        assertEquals(false, s.matches.single().won)
+        assertEquals(1, s.losses)
+        assertNull(s.matches.single().values["kill_participation"]) // The detail only contains the Radiant score.
+    }
+
     @Test fun `overview modes change only thinking and arguments cannot crash on invalid ids`() {
         val s=fixture()
         val normal=overviewRequest(s,OverviewMode.NORMAL,"model");val deep=overviewRequest(s,OverviewMode.DEEP,"model")

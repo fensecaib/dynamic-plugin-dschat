@@ -94,15 +94,6 @@ jobs:
             exit 1
           fi
 
-      - name: Locate optional release notes
-        id: release_notes
-        shell: bash
-        run: |
-          notes_file="release-notes/${GITHUB_REF_NAME}.md"
-          if [[ -f "$notes_file" ]]; then
-            echo "path=$notes_file" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -111,5 +102,4 @@ jobs:
             release/*-all.jar
             release/*-all.jar.sha256
           fail_on_unmatched_files: true
-          body_path: ${{ steps.release_notes.outputs.path }}
           generate_release_notes: true

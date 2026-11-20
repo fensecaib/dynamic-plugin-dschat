@@ -16,6 +16,45 @@ import java.nio.file.Files
 import kotlin.test.*
 
 class Dota2ReportPipelineTest {
+    @Test fun `review cards resolve within the reviewed team and leave ambiguous names unmatched`(
+        @org.junit.jupiter.api.io.TempDir dir: java.nio.file.Path,
+    ) = runBlocking<Unit> {
+        val service = Dota2Service(dir.toFile(), CacheUtils(dir))
+        val match = buildJsonObject {
+            put("radiant_win", false)
+            putJsonArray("players") {
+                for ((i, hero) in listOf(11, 8, 21, 26).withIndex()) add(buildJsonObject {
+                    put("account_id", i + 1)
+                    put("hero_id", hero)
+                    put("isRadiant", i < 2)
+                    put("personaname", if (i == 3) ANONYMOUS_PLAYER_NAME else "同名")
+                })
+            }
+        }
+        val radiant = DsAnalysisResult("主宰(同名)", "输出", "同名", "承伤", "")
+        val dire = DsAnalysisResult("风行者(同名)", "推进", "莱恩", "控制", "")
+        Dota2ReportAssets(emptyMap(), emptyMap()).use { assets ->
+            val normal = service.buildReport(match, radiant, false, assets)
+            assertEquals(8, normal.players.single { it.isSvp }.heroId)
+            assertTrue(normal.players.none { it.isCriminal })
+            assertEquals("同名", normal.criminalName)
+            val full = service.buildFullReport(match, DualAnalyzeResult(radiant, dire), assets)
+            assertEquals(21, full.players.single { it.isMvp }.heroId)
+            assertEquals(8, full.players.single { it.isSvp }.heroId)
+            assertEquals(26, full.players.single { it.isCriminal }.heroId)
+
+            // 两位队友互用对方的英雄名作昵称；模型仍按「英雄(玩家)」明确标出了人选。
+            val aliases = listOf("主宰", "影魔", "同名", ANONYMOUS_PLAYER_NAME)
+            val swapped = JsonObject(match + ("players" to JsonArray(match.getValue("players").jsonArray.mapIndexed { i, row ->
+                JsonObject(row.jsonObject + ("personaname" to JsonPrimitive(aliases[i])))
+            })))
+            val explicit = radiant.copy(mvpOrSvp = "主宰（影魔）", criminal = "影魔(主宰)")
+            val resolved = service.buildReport(swapped, explicit, false, assets)
+            assertEquals(8, resolved.players.singleOrNull { it.isSvp }?.heroId)
+            assertEquals(11, resolved.players.singleOrNull { it.isCriminal }?.heroId)
+        }
+    }
+
     @Test fun `parallel pipeline preserves model request text and rendered report`() = runBlocking<Unit> {
         val dir = Files.createTempDirectory("dota-pipeline-test")
         val service = Dota2Service(dir.toFile(), CacheUtils(dir))
@@ -37,6 +76,7 @@ class Dota2ReportPipelineTest {
                     put("account_id", i); put("hero_id", if (i == 1) 11 else 8); put("personaname", if (i == 1) "A" else "B")
                     put("isRadiant", true); put("kills", 10); put("deaths", 2); put("assists", 15)
                     put("gold_per_min", 600); put("item_0", 2); put("item_1", 2); put("backpack_0", 2); put("backpack_2", 2)
+                    put("item_5", 999); put("item_neutral", 998)
                 })
             }
         }
@@ -55,12 +95,17 @@ class Dota2ReportPipelineTest {
         try {
             val client = DeepSeekClient("test", "http://127.0.0.1:${server.address.port}/chat")
             val originalAnalysis = service.analyzeMatch(1, match, client, "same-model")
-            val original = service.buildReport(match, 1, originalAnalysis, true)
+            val original = service.buildReport(match, originalAnalysis, true)
             try {
                 service.generateMatchReport(match, 1, client, "same-model", true).use { generated ->
                     assertEquals(originalAnalysis, generated.analysis)
                     assertEquals(requests[0], requests[1])
                     assertSame(generated.report.players[0].items[0], generated.report.players[1].items[0])
+                    val player = generated.report.players.first()
+                    assertEquals(listOf(2, 2, 0, 0, 0, 999, 998), player.itemIds)
+                    assertEquals(listOf(2, 0, 2), player.backpackIds)
+                    assertNull(player.items[5])
+                    assertNull(player.items[6])
                     assertNull(generated.report.players[0].backpackItems[1])
                     assertNotNull(generated.report.players[0].backpackItems[2])
                     fun png(image: Image): ByteArray = image.use { it.encodeToData()!!.use { encoded -> encoded.bytes } }

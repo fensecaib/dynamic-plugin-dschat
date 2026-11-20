@@ -8,10 +8,10 @@
 
 - **AI 对话** — 多轮对话，支持记忆（轮数/Token/TTL 三层保护），长文本自动渲染为图片
 - **联网搜索** — DeepSeek Search 和 Fetch 主链，按证据缺口补查；可选 Exa MCP → Parallel MCP → DuckDuckGo 备用链路，默认关闭
-- **Dota2 战报** — OpenDota API + DeepSeek AI 分析，MVP/战犯识别，表格图片渲染
-- **Dota2 历史** — 近期战绩卡片，英雄头像、彩色 K/D/A、胜负汇总与实时序号查询
+- **Dota2 战报** — 按阵营展示玩家战绩、主装备、背包和中立物品，赛后点评配对应玩家的战绩卡
+- **Dota2 历史** — 单列展示最近十场，序号 01 对应最新一场，可按同一序号查询战报
 - **Dota2 分析** — 双阵营全分析
-- **Dota2 个人详情** — 最近十场统一统计、多维分析、基准雷达、逐场趋势、英雄分布与两场代表局；普通/深度两种模式
+- **Dota2 个人详情** — 先看最近十场明细，再看英雄分布、基准雷达与逐场趋势。代表对局并排展示战绩卡、终局装备和复盘正文
 
 ## 效果演示
 
@@ -84,7 +84,7 @@
 .\gradlew.bat fatJar
 ```
 
-把 `build/libs/dynamic-bot-agent-0.0.8-all.jar` 放入宿主 `plugins/` 目录，启动或重启 dynamic-bot 即可。
+把 `build/libs/dynamic-bot-agent-0.0.11-all.jar` 放入宿主 `plugins/` 目录，启动或重启 dynamic-bot 即可。
 
 > 构建前需将 `top.colter.skiko:skiko-layout:0.0.9` 安装到本地 Maven 仓库。
 

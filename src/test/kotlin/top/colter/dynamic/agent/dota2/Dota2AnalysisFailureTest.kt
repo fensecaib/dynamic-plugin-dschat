@@ -130,6 +130,37 @@ class Dota2AnalysisFailureTest {
         }
     }
 
+    @Test fun `model headings stay on the player card and review text retains line breaks`() = runBlocking<Unit> {
+        val reply = "[战犯]：\n主宰(B): 推进不足。\n[MVP]：影魔（A:一号）：输出最高。\n— 再接再厉。"
+        Fixture(200, reply).use { fixture ->
+            val result = assertNotNull(fixture.service.analyzeMatch(1, match(), fixture.client, "local-model"))
+            assertEquals("影魔（A:一号）", result.mvpOrSvp)
+            assertEquals("输出最高。\n— 再接再厉。", result.mvpOrSvpText)
+            assertEquals("主宰(B)", result.criminal)
+            assertEquals("推进不足。", result.criminalText)
+            assertEquals(reply, result.rawResponse)
+        }
+    }
+
+    @Test fun `a named player without review text is an incomplete analysis`() = runBlocking<Unit> {
+        Fixture(200, "[战犯]\n主宰(B): 发挥欠佳。\n[MVP]\n影魔(A)：").use { fixture ->
+            val error = assertFailsWith<DotaAnalysisUnavailableException> {
+                fixture.service.analyzeMatch(1, match(), fixture.client, "local-model")
+            }
+            assertEquals("analysis_format", error.category)
+        }
+    }
+
+    @Test fun `section tags can directly precede the hero name`() = runBlocking<Unit> {
+        Fixture(200, "[MVP]影魔(A)：输出最高。\n[战犯]主宰(B)：推进不足。").use { fixture ->
+            val result = assertNotNull(fixture.service.analyzeMatch(1, match(), fixture.client, "local-model"))
+            assertEquals("影魔(A)", result.mvpOrSvp)
+            assertEquals("输出最高。", result.mvpOrSvpText)
+            assertEquals("主宰(B)", result.criminal)
+            assertEquals("推进不足。", result.criminalText)
+        }
+    }
+
     @Test fun `overview first request failure stops without producing a statistics-only success`() = runBlocking<Unit> {
         Fixture(503, "").use { fixture ->
             val snapshot = OverviewSnapshot(1, "A", listOf(

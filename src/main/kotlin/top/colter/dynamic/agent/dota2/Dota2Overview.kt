@@ -27,8 +27,12 @@ internal data class OverviewMatch(
     val values: Map<String, Double>, val benchmarks: Map<String, Double>, val items: List<Int>, val detailAvailable: Boolean,
 ) {
     fun number(key: String) = values[key]?.let { String.format(Locale.ROOT, "%.0f", it) } ?: "—"
-    val selectionScore: Double? get() = listOf("gold_per_min", "hero_damage_per_min", "tower_damage")
-        .map { benchmarks[it] }.takeIf { it.all { v -> v != null } }?.filterNotNull()?.average()
+    val selectionScore: Double? = run {
+        val economy = benchmarks["gold_per_min"] ?: return@run null
+        val damage = benchmarks["hero_damage_per_min"] ?: return@run null
+        val push = benchmarks["tower_damage"] ?: return@run null
+        (economy + damage + push) / 3
+    }
 }
 
 internal data class OverviewRepresentative(val match: OverviewMatch, val label: String)
@@ -40,18 +44,27 @@ internal data class OverviewSnapshot(val accountId: Long, val player: String, va
         val values = matches.mapNotNull { (if (benchmark) it.benchmarks else it.values)[key] }
         return OverviewValue(values.takeIf { it.isNotEmpty() }?.average(), values.size)
     }
-    val representatives: List<OverviewRepresentative> get() {
-        val eligible = matches.filter { it.selectionScore != null }.sortedWith(compareBy<OverviewMatch> { it.selectionScore }.thenBy { it.id })
-        if (eligible.isEmpty()) return emptyList()
-        if (eligible.size == 1) return listOf(OverviewRepresentative(eligible.single(), "参考样本"))
-        return listOf(OverviewRepresentative(eligible.last(), "优势样本"), OverviewRepresentative(eligible.first(), "待复盘样本"))
-    }
+    val representatives = matches.filter { it.selectionScore != null }
+        .sortedWith(compareBy<OverviewMatch> { it.selectionScore }.thenBy { it.id })
+        .let { eligible ->
+            when (eligible.size) {
+                0 -> emptyList()
+                1 -> listOf(OverviewRepresentative(eligible.single(), "参考样本"))
+                else -> listOf(OverviewRepresentative(eligible.last(), "优势样本"), OverviewRepresentative(eligible.first(), "待复盘样本"))
+            }
+        }
 }
 
 internal val overviewMetrics = linkedMapOf("gold_per_min" to "经济", "xp_per_min" to "经验", "last_hits_per_min" to "补刀", "hero_damage_per_min" to "伤害", "tower_damage" to "推进")
 private val overviewFields = listOf("kills", "deaths", "assists", "gold_per_min", "xp_per_min", "last_hits", "hero_damage", "tower_damage")
 private fun JsonObject.num(key: String) = (get(key) as? JsonPrimitive)?.doubleOrNull?.takeIf { it.isFinite() && it >= 0 }
 private fun JsonObject.long(key: String) = (get(key) as? JsonPrimitive)?.longOrNull
+private fun JsonObject.radiantSlot(): Boolean? = when (long("player_slot")) {
+    in 0L..4L -> true
+    in 128L..132L -> false
+    else -> null
+}
+private fun JsonObject.bool(key: String) = (get(key) as? JsonPrimitive)?.booleanOrNull
 
 internal fun buildOverviewSnapshot(accountId: Long, profile: JsonObject?, recent: JsonArray, details: Map<Long, JsonObject>, heroName: (Int) -> String): OverviewSnapshot {
     val rows = orderedRecentMatches(recent, 10).mapNotNull { it as? JsonObject }.distinctBy { it.long("match_id") }.mapNotNull { row ->
@@ -59,9 +72,8 @@ internal fun buildOverviewSnapshot(accountId: Long, profile: JsonObject?, recent
         val detail = details[id]?.takeIf { it.long("match_id") == id }
         val me = (detail?.get("players") as? JsonArray)?.mapNotNull { it as? JsonObject }?.find { it.long("account_id") == accountId }
         val source = me ?: row
-        val slot = source.long("player_slot")?.takeIf { it in 0..4 || it in 128..132 }
-        val side = (me?.get("isRadiant") as? JsonPrimitive)?.booleanOrNull ?: slot?.let { it < 128 }
-        val rw = ((detail?.takeIf { me != null }?.get("radiant_win") ?: row["radiant_win"]) as? JsonPrimitive)?.booleanOrNull
+        val side = me?.bool("isRadiant") ?: me?.radiantSlot() ?: row.radiantSlot()
+        val rw = detail?.takeIf { me != null }?.bool("radiant_win") ?: row.bool("radiant_win")
         val values = overviewFields.mapNotNull { key -> (source.num(key) ?: row.num(key))?.let { key to it } }.toMap().toMutableMap()
         val teamKills = if (me != null && side != null) detail.num(if (side) "radiant_score" else "dire_score") else null
         val k = values["kills"]; val a = values["assists"]

@@ -39,6 +39,10 @@ class Dota2Service(
 
     companion object {
         private const val CDN_BASE = "https://cdn.cloudflare.steamstatic.com"
+        private val itemFields = (0..5).map { "item_$it" } + "item_neutral"
+        private val backpackFields = (0..2).map { "backpack_$it" }
+        // 模型约定的「英雄(玩家)」题头；昵称本身可以含空格、冒号或括号。
+        private val analysisHeading = Regex("""^([^()（）:：\n]+?)\s*[(（](.*?)[)）]\s*(?=[:：]|$)""")
 
         val dota2SystemPrompt = """
 You are a Dota 2 post-match roast analyst. You analyze only ONE team's data. Your tone is like a drill sergeant debriefing — ruthless and direct. **Output language: Simplified Chinese only.**
@@ -516,11 +520,6 @@ $dota2RoastStyle
             .map { it.trim().removePrefix(">").trim() }
             .filter { it.isNotBlank() }
 
-        fun cleanSection(lines: List<String>): String {
-            return lines.map { it.trim().removePrefix(">").trim() }
-                .filter { it.isNotBlank() }.joinToString("\n")
-        }
-
         fun guessName(firstLine: String): String {
             val colonIndex = listOf(firstLine.indexOf(":"), firstLine.indexOf("："))
                 .filter { it >= 0 }.minOrNull()
@@ -537,12 +536,10 @@ $dota2RoastStyle
 
         fun extract(tag: String): Pair<String, String>? {
             val tagText = "[$tag]"
-            val start = normalizedLines.indexOfFirst {
-                it == tagText || it.startsWith("$tagText ") || it.startsWith("$tagText:") || it.startsWith("$tagText：")
-            }
+            val start = normalizedLines.indexOfFirst { it.startsWith(tagText) }
             if (start < 0) return null
 
-            val head = normalizedLines[start].removePrefix(tagText).trim()
+            val head = normalizedLines[start].removePrefix(tagText).trimStart().trimStart(':', '：').trimStart()
             val bodyLines = buildList {
                 if (head.isNotBlank()) add(head)
                 for (i in start + 1 until normalizedLines.size) {
@@ -552,11 +549,12 @@ $dota2RoastStyle
                 }
             }
 
-            val text = cleanSection(bodyLines)
-            if (text.isBlank()) return null
-            val firstLine = text.lines().firstOrNull()?.trim() ?: ""
-            val name = guessName(firstLine)
-            return name to text
+            val firstLine = bodyLines.firstOrNull() ?: return null
+            val heading = analysisHeading.find(firstLine)
+            if (heading == null) return guessName(firstLine) to bodyLines.joinToString("\n")
+            val firstComment = firstLine.substring(heading.range.last + 1).trimStart(':', '：').trimStart()
+            val comment = (listOf(firstComment) + bodyLines.drop(1)).joinToString("\n").trim()
+            return if (comment.isEmpty()) null else heading.value.trimEnd() to comment
         }
 
         val mvp = extract("MVP")
@@ -597,7 +595,7 @@ $dota2RoastStyle
                         }
                         val analysis = measureDotaStage(matchId, "ai", mode) { analyzeMatch(myAccountId, matchJson, dsClient, model, mode) }
                         val assets = pendingAssets.await()
-                        val report = measureDotaStage(matchId, "assemble", mode) { buildReport(matchJson, myAccountId, analysis, won, assets) }
+                        val report = measureDotaStage(matchId, "assemble", mode) { buildReport(matchJson, analysis, won, assets) }
                         GeneratedDota2Report(analysis, report, assets)
                     }
                 }
@@ -638,10 +636,11 @@ $dota2RoastStyle
 
     private suspend fun prepareReportAssets(matchJson: JsonObject): Dota2ReportAssets {
         val players = matchJson["players"]?.jsonArray.orEmpty().map { it.jsonObject }
+        val equipmentFields = itemFields + backpackFields
         val keys = buildList {
             players.forEach { p ->
                 add(true to (p["hero_id"]?.jsonPrimitive?.intOrNull ?: 0))
-                ((0..5).map { "item_$it" } + (0..2).map { "backpack_$it" } + "item_neutral").forEach { field ->
+                equipmentFields.forEach { field ->
                     add(false to (p[field]?.jsonPrimitive?.intOrNull ?: 0))
                 }
             }
@@ -670,18 +669,17 @@ $dota2RoastStyle
     }
 
     internal suspend fun buildReport(
-        matchJson: JsonObject, myAccountId: Long,
+        matchJson: JsonObject,
         dsResult: DsAnalysisResult?, won: Boolean, assets: Dota2ReportAssets? = null,
     ): Dota2MatchReport {
         if (assets == null) { ensureConstants(); ensureAghsIcons() }
         val players = matchJson["players"]?.jsonArray ?: JsonArray(emptyList())
         val radiantWin = matchJson["radiant_win"]?.jsonPrimitive?.boolean ?: false
 
-        val cards = players.map { p -> buildPlayerCard(p.jsonObject, won, dsResult, assets) }
-        val mvpOrSvpCard = cards.find { if (won) it.isMvp else it.isSvp }
-            ?: findAnalysisCard(cards, dsResult?.mvpOrSvp)
-        val criminalCard = cards.find { it.isCriminal }
-            ?: findAnalysisCard(cards, dsResult?.criminal)
+        val cards = players.map { buildPlayerCard(it.jsonObject, assets) }
+        val team = cards.filter { it.isRadiant == (won == radiantWin) }
+        val mvpOrSvpCard = findAnalysisCard(team, dsResult?.mvpOrSvp)
+        val criminalCard = findAnalysisCard(team, dsResult?.criminal)
 
         return Dota2MatchReport(
             matchId = matchJson["match_id"]?.jsonPrimitive?.longOrNull ?: 0,
@@ -690,7 +688,7 @@ $dota2RoastStyle
             gameMode = gameModeName(matchJson["game_mode"]?.jsonPrimitive?.intOrNull ?: 0),
             radiantScore = matchJson["radiant_score"]?.jsonPrimitive?.intOrNull ?: 0,
             direScore = matchJson["dire_score"]?.jsonPrimitive?.intOrNull ?: 0,
-            radiantWin = radiantWin, players = cards,
+            radiantWin = radiantWin, players = cards.map { it.withAwards(won, mvpOrSvpCard, criminalCard) },
             mvpName = if (won) analysisDisplayName(mvpOrSvpCard, dsResult?.mvpOrSvp) else "N/A",
             mvpReason = if (won) (dsResult?.mvpOrSvpText ?: "分析失败") else "N/A",
             svpName = if (!won) analysisDisplayName(mvpOrSvpCard, dsResult?.mvpOrSvp) else "N/A",
@@ -703,7 +701,7 @@ $dota2RoastStyle
     suspend fun buildFullReport(matchJson: JsonObject, dual: DualAnalyzeResult?): Dota2MatchReport =
         buildFullReport(matchJson, dual, null)
 
-    private suspend fun buildFullReport(
+    internal suspend fun buildFullReport(
         matchJson: JsonObject, dual: DualAnalyzeResult?, assets: Dota2ReportAssets?,
     ): Dota2MatchReport {
         if (assets == null) { ensureConstants(); ensureAghsIcons() }
@@ -711,7 +709,7 @@ $dota2RoastStyle
         val radiantWin = matchJson["radiant_win"]?.jsonPrimitive?.boolean ?: false
         val r = dual?.radiant; val d = dual?.dire
 
-        val cards = players.map { buildPlayerCard(it.jsonObject, false, null, assets) }
+        val cards = players.map { buildPlayerCard(it.jsonObject, assets) }
         val radiantCards = cards.filter { it.isRadiant }
         val direCards = cards.filter { !it.isRadiant }
         val radiantMvpCard = findAnalysisCard(radiantCards, r?.mvpOrSvp)
@@ -726,7 +724,10 @@ $dota2RoastStyle
             gameMode = gameModeName(matchJson["game_mode"]?.jsonPrimitive?.intOrNull ?: 0),
             radiantScore = matchJson["radiant_score"]?.jsonPrimitive?.intOrNull ?: 0,
             direScore = matchJson["dire_score"]?.jsonPrimitive?.intOrNull ?: 0,
-            radiantWin = radiantWin, players = cards,
+            radiantWin = radiantWin, players = cards.map {
+                if (it.isRadiant) it.withAwards(radiantWin, radiantMvpCard, radiantCriminalCard)
+                else it.withAwards(!radiantWin, direMvpCard, direCriminalCard)
+            },
             mvpName = "N/A", mvpReason = "N/A", svpName = "N/A", svpReason = "N/A",
             criminalName = "N/A", criminalReason = "N/A",
             radiantMvp = analysisDisplayName(radiantMvpCard, r?.mvpOrSvp),
@@ -741,12 +742,13 @@ $dota2RoastStyle
     }
 
     private suspend fun buildPlayerCard(
-        obj: JsonObject, won: Boolean, dsResult: DsAnalysisResult?, assets: Dota2ReportAssets? = null,
+        obj: JsonObject, assets: Dota2ReportAssets?,
     ): Dota2PlayerCard {
         val heroId = obj["hero_id"]?.jsonPrimitive?.intOrNull ?: 0
-        val itemIds = (0..5).map { obj["item_$it"]?.jsonPrimitive?.intOrNull ?: 0 }
-        val bpIds = (0..2).map { obj["backpack_$it"]?.jsonPrimitive?.intOrNull ?: 0 }
-        val neutralIds = listOf(obj["item_neutral"]?.jsonPrimitive?.intOrNull ?: 0)
+        val itemIds = itemFields.map { obj[it]?.jsonPrimitive?.intOrNull ?: 0 }
+        val bpIds = backpackFields.map { obj[it]?.jsonPrimitive?.intOrNull ?: 0 }
+        val hasScepter = (obj["aghanims_scepter"]?.jsonPrimitive?.intOrNull ?: 0) > 0
+        val hasShard = (obj["aghanims_shard"]?.jsonPrimitive?.intOrNull ?: 0) > 0
         val isRadiant = analysisTeamSide(obj) == 0
         suspend fun item(id: Int): Image? = if (assets == null) loadItemIcon(id) else assets.items[id]
 
@@ -764,33 +766,44 @@ $dota2RoastStyle
             towerDamage = obj["tower_damage"]?.jsonPrimitive?.intOrNull ?: 0,
             level = obj["level"]?.jsonPrimitive?.intOrNull ?: 0,
             lastHits = obj["last_hits"]?.jsonPrimitive?.intOrNull ?: 0,
-            items = itemIds.map { item(it) } + neutralIds.mapNotNull { item(it) },
+            items = itemIds.map { item(it) },
+            itemIds = itemIds,
             denies = obj["denies"]?.jsonPrimitive?.intOrNull ?: 0,
             netWorth = obj["net_worth"]?.jsonPrimitive?.intOrNull ?: 0,
             heroHealing = obj["hero_healing"]?.jsonPrimitive?.intOrNull ?: 0,
             // 背包必须保留三个固定槽位，避免中间空槽导致后续物品向前错位。
             backpackItems = bpIds.map { item(it) },
-            hasAghsScepter = (obj["aghanims_scepter"]?.jsonPrimitive?.intOrNull ?: 0) > 0,
-            hasAghsShard = (obj["aghanims_shard"]?.jsonPrimitive?.intOrNull ?: 0) > 0,
-            aghsScepterIcon = getAghsIcon((obj["aghanims_scepter"]?.jsonPrimitive?.intOrNull ?: 0) > 0, false),
-            aghsShardIcon = getAghsIcon((obj["aghanims_shard"]?.jsonPrimitive?.intOrNull ?: 0) > 0, true),
+            backpackIds = bpIds,
+            hasAghsScepter = hasScepter,
+            hasAghsShard = hasShard,
+            aghsScepterIcon = getAghsIcon(hasScepter, false),
+            aghsShardIcon = getAghsIcon(hasShard, true),
             rankTier = obj["rank_tier"]?.jsonPrimitive?.intOrNull ?: 0,
             rankName = rankName(obj["rank_tier"]?.jsonPrimitive?.intOrNull ?: 0),
-            isMvp = won && nameContains(dsResult?.mvpOrSvp, obj),
-            isSvp = !won && nameContains(dsResult?.mvpOrSvp, obj),
-            isCriminal = nameContains(dsResult?.criminal, obj)
         )
     }
 
+    private fun Dota2PlayerCard.withAwards(won: Boolean, standout: Dota2PlayerCard?, criminal: Dota2PlayerCard?) =
+        if (this !== standout && this !== criminal) this
+        else copy(isMvp = won && this === standout, isSvp = !won && this === standout, isCriminal = this === criminal)
+
     private fun findAnalysisCard(cards: List<Dota2PlayerCard>, name: String?): Dota2PlayerCard? {
         if (name.isNullOrBlank()) return null
-        return cards.firstOrNull { card ->
-            val playerName = card.name.takeUnless(::isAnonymousDota2PlayerName)
-            val heroName = card.heroName.takeIf { it.isNotBlank() }
-            val englishHeroName = heroNames[card.heroId]?.takeIf { it.isNotBlank() }
-            matchesDota2AnalysisIdentity(name, playerName) ||
-                matchesDota2AnalysisIdentity(name, heroName) ||
-                matchesDota2AnalysisIdentity(name, englishHeroName)
+        val heading = analysisHeading.matchEntire(name)
+        val heroField = heading?.groupValues?.get(1)?.trim()
+        val playerField = heading?.groupValues?.get(2)?.trim()
+        fun matches(field: String?, identity: String?) =
+            if (field == null) matchesDota2AnalysisIdentity(name, identity) else field == identity
+        val heroes = cards.filter {
+            matches(heroField, it.heroName) || matches(heroField, heroNames[it.heroId])
+        }
+        val players = cards.filter {
+            !isAnonymousDota2PlayerName(it.name) && matches(playerField, it.name)
+        }
+        return when {
+            heroes.isEmpty() -> players.singleOrNull()
+            players.isEmpty() -> heroes.singleOrNull()
+            else -> heroes.singleOrNull { it in players }
         }
     }
 
@@ -815,17 +828,6 @@ $dota2RoastStyle
         1, 22 -> "全英雄选择"; 2 -> "队长模式"; 3 -> "随机征召"; 4 -> "个别征召"
         5 -> "全阵营随机"; 16 -> "队长征召"; 18 -> "技能征召"; 23 -> "加速模式"
         else -> "模式$mode"
-    }
-
-    private fun nameContains(name: String?, obj: JsonObject): Boolean {
-        if (name.isNullOrBlank()) return false
-        val heroId = obj["hero_id"]?.jsonPrimitive?.intOrNull ?: 0
-        val personaname = playerDisplayName(obj).takeUnless(::isAnonymousDota2PlayerName)
-        val localizedHeroName = heroName(heroId)
-        val englishHeroName = heroNames[heroId]
-        return matchesDota2AnalysisIdentity(name, personaname) ||
-            matchesDota2AnalysisIdentity(name, localizedHeroName) ||
-            matchesDota2AnalysisIdentity(name, englishHeroName)
     }
 
     private fun playerDisplayName(obj: JsonObject): String = normalizeDota2PlayerName(
