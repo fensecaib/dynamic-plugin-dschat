@@ -439,7 +439,7 @@ class FeatureDispatchTest {
         private val target = TargetAddress.of("qq", TargetKind.GROUP, "group")
         private val context = PluginContext(
             pluginId = "feature-test",
-            descriptor = PluginDescriptor(id = "feature-test", name = "test", version = "test", mainClass = "test", apiVersion = "4.0.0"),
+            descriptor = PluginDescriptor(id = "feature-test", name = "test", version = "test", mainClass = "test"),
             configService = unused(), dataStore = unused(), scope = CoroutineScope(job + dispatcher),
             taskScheduler = unused(), sourceUpdatePublisher = unused(), sourceStateStore = unused(), subscriptionQueryService = unused(),
             messagePublisher = object : PluginMessagePublisher {

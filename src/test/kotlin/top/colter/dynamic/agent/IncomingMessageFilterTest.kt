@@ -51,7 +51,7 @@ class IncomingMessageFilterTest {
             val cache = CacheUtils(unusedDir)
             val context = PluginContext(
                 pluginId = "filter-test",
-                descriptor = PluginDescriptor(id = "filter-test", name = "test", version = "test", mainClass = "test", apiVersion = "4.0.0"),
+                descriptor = PluginDescriptor(id = "filter-test", name = "test", version = "test", mainClass = "test"),
                 configService = unused(), dataStore = unused(), scope = CoroutineScope(job + dispatcher),
                 taskScheduler = unused(), sourceUpdatePublisher = unused(), sourceStateStore = unused(),
                 subscriptionQueryService = unused(), messagePublisher = unused(),

@@ -298,7 +298,7 @@ class DynamicAgentPluginConfigTest {
         } as ConfigService
         private val context = PluginContext(
             pluginId = "config-memory-test",
-            descriptor = PluginDescriptor(id = "config-memory-test", name = "test", version = "test", mainClass = "test", apiVersion = "4.0.0"),
+            descriptor = PluginDescriptor(id = "config-memory-test", name = "test", version = "test", mainClass = "test"),
             configService = configService, dataStore = unused(), scope = hostScope,
             taskScheduler = unused(), sourceUpdatePublisher = unused(), sourceStateStore = unused(), subscriptionQueryService = unused(),
             messagePublisher = unused(),

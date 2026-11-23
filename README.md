@@ -78,15 +78,13 @@
 
 ## 安装
 
-本插件适配 dynamic-bot v0.0.10（插件 API **4.x**），使用 `dynamic-bot-core:0.0.6` 编译，插件声明 `apiVersion: 4.0.0`。
+插件 v0.0.12 适配 dynamic-bot v0.0.11 的插件 API 5，使用 `dynamic-bot-core:0.0.7` 编译，声明 `apiVersion: 5.0.0`。
 
 ```powershell
 .\gradlew.bat fatJar
 ```
 
-把 `build/libs/dynamic-bot-agent-0.0.11-all.jar` 放入宿主 `plugins/` 目录，启动或重启 dynamic-bot 即可。
-
-> 构建前需将 `top.colter.skiko:skiko-layout:0.0.9` 安装到本地 Maven 仓库。
+将 `build/libs/dynamic-bot-agent-0.0.12-all.jar` 放入宿主 `plugins/` 目录，替换旧版插件 JAR，再启动或重启 dynamic-bot。升级时保留原有插件配置和数据。
 
 ## 配置
 
